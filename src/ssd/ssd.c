@@ -7,6 +7,7 @@
  */
 
 #include <assert.h>
+#include <strings.h>
 #include "common/mem.h"
 #include "common/scene-helpers.h"
 #include "labwc.h"
@@ -185,12 +186,13 @@ ssd_create(struct view *view, bool active)
 	ssd->tree = wlr_scene_tree_create(view->scene_tree);
 	wlr_scene_node_lower_to_bottom(&ssd->tree->node);
 	ssd->titlebar.height = view->server->theme->title_height;
+	ssd_shadow_create(ssd);
 	ssd_extents_create(ssd);
 	ssd_border_create(ssd);
 	ssd_titlebar_create(ssd);
 	if (view->ssd_titlebar_hidden) {
 		/* Ensure we keep the old state on Reconfigure or when exiting fullscreen */
-		ssd_titlebar_hide(ssd);
+		ssd_set_titlebar(ssd, false);
 	}
 	ssd->margin = ssd_thickness(view);
 	ssd_set_active(ssd, active);
@@ -228,6 +230,16 @@ ssd_update_geometry(struct ssd *ssd)
 	int eff_width = current.width;
 	int eff_height = view_effective_height(ssd->view, /* use_pending */ false);
 
+	if (eff_width > 0 && eff_width < LAB_MIN_VIEW_WIDTH) {
+		/*
+		 * Prevent negative values in calculations like
+		 * `width - SSD_BUTTON_WIDTH * SSD_BUTTON_COUNT`
+		 */
+		wlr_log(WLR_ERROR,
+			"view width is smaller than its minimal value");
+		return;
+	}
+
 	if (eff_width == cached.width && eff_height == cached.height) {
 		if (current.x != cached.x || current.y != cached.y) {
 			/* Dynamically resize extents based on position and usable_area */
@@ -238,6 +250,7 @@ ssd_update_geometry(struct ssd *ssd)
 		if (ssd->state.was_maximized != maximized) {
 			ssd_border_update(ssd);
 			ssd_titlebar_update(ssd);
+			ssd_shadow_update(ssd);
 			/*
 			 * Not strictly necessary as ssd_titlebar_update()
 			 * already sets state.was_maximized but to future
@@ -250,19 +263,21 @@ ssd_update_geometry(struct ssd *ssd)
 	ssd_extents_update(ssd);
 	ssd_border_update(ssd);
 	ssd_titlebar_update(ssd);
+	ssd_shadow_update(ssd);
 	ssd->state.geometry = current;
 }
 
 void
-ssd_titlebar_hide(struct ssd *ssd)
+ssd_set_titlebar(struct ssd *ssd, bool enabled)
 {
-	if (!ssd || !ssd->titlebar.tree->node.enabled) {
+	if (!ssd || ssd->titlebar.tree->node.enabled == enabled) {
 		return;
 	}
-	wlr_scene_node_set_enabled(&ssd->titlebar.tree->node, false);
-	ssd->titlebar.height = 0;
+	wlr_scene_node_set_enabled(&ssd->titlebar.tree->node, enabled);
+	ssd->titlebar.height = enabled ? ssd->view->server->theme->title_height : 0;
 	ssd_border_update(ssd);
 	ssd_extents_update(ssd);
+	ssd_shadow_update(ssd);
 	ssd->margin = ssd_thickness(ssd->view);
 }
 
@@ -286,6 +301,7 @@ ssd_destroy(struct ssd *ssd)
 	ssd_titlebar_destroy(ssd);
 	ssd_border_destroy(ssd);
 	ssd_extents_destroy(ssd);
+	ssd_shadow_destroy(ssd);
 	wlr_scene_node_destroy(&ssd->tree->node);
 
 	free(ssd);
@@ -294,7 +310,7 @@ ssd_destroy(struct ssd *ssd)
 bool
 ssd_part_contains(enum ssd_part_type whole, enum ssd_part_type candidate)
 {
-	if (whole == candidate) {
+	if (whole == candidate || whole == LAB_SSD_ALL) {
 		return true;
 	}
 	if (whole == LAB_SSD_PART_TITLEBAR) {
@@ -329,6 +345,21 @@ ssd_part_contains(enum ssd_part_type whole, enum ssd_part_type candidate)
 	return false;
 }
 
+enum ssd_mode
+ssd_mode_parse(const char *mode)
+{
+	if (!mode) {
+		return LAB_SSD_MODE_FULL;
+	}
+	if (!strcasecmp(mode, "none")) {
+		return LAB_SSD_MODE_NONE;
+	} else if (!strcasecmp(mode, "border")) {
+		return LAB_SSD_MODE_BORDER;
+	} else {
+		return LAB_SSD_MODE_FULL;
+	}
+}
+
 void
 ssd_set_active(struct ssd *ssd, bool active)
 {
@@ -337,8 +368,16 @@ ssd_set_active(struct ssd *ssd, bool active)
 	}
 	wlr_scene_node_set_enabled(&ssd->border.active.tree->node, active);
 	wlr_scene_node_set_enabled(&ssd->titlebar.active.tree->node, active);
+	if (ssd->shadow.active.tree) {
+		wlr_scene_node_set_enabled(
+			&ssd->shadow.active.tree->node, active);
+	}
 	wlr_scene_node_set_enabled(&ssd->border.inactive.tree->node, !active);
 	wlr_scene_node_set_enabled(&ssd->titlebar.inactive.tree->node, !active);
+	if (ssd->shadow.inactive.tree) {
+		wlr_scene_node_set_enabled(
+			&ssd->shadow.inactive.tree->node, !active);
+	}
 }
 
 void
@@ -349,6 +388,7 @@ ssd_enable_shade(struct ssd *ssd, bool enable)
 	}
 	ssd_border_update(ssd);
 	wlr_scene_node_set_enabled(&ssd->extents.tree->node, !enable);
+	ssd_shadow_update(ssd);
 }
 
 void

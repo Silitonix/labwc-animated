@@ -10,6 +10,13 @@
 #define SSD_EXTENDED_AREA 8
 
 /*
+ * Shadows should start at a point inset from the actual window border, see
+ * discussion on https://github.com/labwc/labwc/pull/1648.  This constant
+ * specifies inset as a multiple of visible shadow size.
+ */
+#define SSD_SHADOW_INSET 0.3
+
+/*
  * Sequence these according to the order they should be processed for
  * press and hover events. Bear in mind that some of their respective
  * interactive areas overlap, so for example buttons need to come before title.
@@ -38,7 +45,14 @@ enum ssd_part_type {
 	LAB_SSD_LAYER_SURFACE,
 	LAB_SSD_LAYER_SUBSURFACE,
 	LAB_SSD_UNMANAGED,
+	LAB_SSD_ALL,
 	LAB_SSD_END_MARKER
+};
+
+enum ssd_mode {
+	LAB_SSD_MODE_NONE,
+	LAB_SSD_MODE_BORDER,
+	LAB_SSD_MODE_FULL
 };
 
 /* Forward declare arguments */
@@ -65,7 +79,7 @@ void ssd_set_active(struct ssd *ssd, bool active);
 void ssd_update_title(struct ssd *ssd);
 void ssd_update_geometry(struct ssd *ssd);
 void ssd_destroy(struct ssd *ssd);
-void ssd_titlebar_hide(struct ssd *ssd);
+void ssd_set_titlebar(struct ssd *ssd, bool enabled);
 
 void ssd_enable_keybind_inhibit_indicator(struct ssd *ssd, bool enable);
 void ssd_enable_shade(struct ssd *ssd, bool enable);
@@ -85,6 +99,7 @@ enum ssd_part_type ssd_get_part_type(const struct ssd *ssd,
 uint32_t ssd_resize_edges(enum ssd_part_type type);
 bool ssd_is_button(enum ssd_part_type type);
 bool ssd_part_contains(enum ssd_part_type whole, enum ssd_part_type candidate);
+enum ssd_mode ssd_mode_parse(const char *mode);
 
 /* TODO: clean up / update */
 struct border ssd_thickness(struct view *view);

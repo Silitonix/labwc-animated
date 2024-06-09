@@ -3,14 +3,15 @@
 #define LABWC_VIEW_H
 
 #include "config.h"
+#include "ssd.h"
 #include <stdbool.h>
 #include <stdint.h>
 #include <wayland-util.h>
 #include <wlr/util/box.h>
 #include <xkbcommon/xkbcommon.h>
 
-#define LAB_MIN_VIEW_WIDTH  100
-#define LAB_MIN_VIEW_HEIGHT  60
+#define LAB_MIN_VIEW_WIDTH (SSD_BUTTON_WIDTH * SSD_BUTTON_COUNT)
+#define LAB_MIN_VIEW_HEIGHT 60
 
 /*
  * In labwc, a view is a container for surfaces which can be moved around by
@@ -67,6 +68,26 @@ enum view_wants_focus {
 	VIEW_WANTS_FOCUS_OFFER,
 };
 
+enum window_type {
+	/* https://specifications.freedesktop.org/wm-spec/wm-spec-1.4.html#idm45649101374512 */
+	NET_WM_WINDOW_TYPE_DESKTOP = 0,
+	NET_WM_WINDOW_TYPE_DOCK,
+	NET_WM_WINDOW_TYPE_TOOLBAR,
+	NET_WM_WINDOW_TYPE_MENU,
+	NET_WM_WINDOW_TYPE_UTILITY,
+	NET_WM_WINDOW_TYPE_SPLASH,
+	NET_WM_WINDOW_TYPE_DIALOG,
+	NET_WM_WINDOW_TYPE_DROPDOWN_MENU,
+	NET_WM_WINDOW_TYPE_POPUP_MENU,
+	NET_WM_WINDOW_TYPE_TOOLTIP,
+	NET_WM_WINDOW_TYPE_NOTIFICATION,
+	NET_WM_WINDOW_TYPE_COMBO,
+	NET_WM_WINDOW_TYPE_DND,
+	NET_WM_WINDOW_TYPE_NORMAL,
+
+	WINDOW_TYPE_LEN
+};
+
 struct view;
 struct wlr_surface;
 
@@ -106,15 +127,18 @@ struct view_impl {
 	void (*minimize)(struct view *view, bool minimize);
 	void (*move_to_front)(struct view *view);
 	void (*move_to_back)(struct view *view);
+	void (*shade)(struct view *view, bool shaded);
 	struct view *(*get_root)(struct view *self);
 	void (*append_children)(struct view *self, struct wl_array *children);
-	/* determines if view and surface are owned by the same process */
-	bool (*is_related)(struct view *self, struct wlr_surface *surface);
 	struct view_size_hints (*get_size_hints)(struct view *self);
 	/* if not implemented, VIEW_WANTS_FOCUS_ALWAYS is assumed */
 	enum view_wants_focus (*wants_focus)(struct view *self);
 	/* returns true if view reserves space at screen edge */
 	bool (*has_strut_partial)(struct view *self);
+	/* returns true if view declared itself a window type */
+	bool (*contains_window_type)(struct view *view, int32_t window_type);
+	/* returns the client pid that this view belongs to */
+	pid_t (*get_pid)(struct view *view);
 };
 
 struct view {
@@ -242,6 +266,9 @@ struct view_query {
 	struct wl_list link;
 	char *identifier;
 	char *title;
+	int window_type;
+	char *sandbox_engine;
+	char *sandbox_app_id;
 };
 
 struct xdg_toplevel_view {
@@ -267,6 +294,7 @@ enum lab_view_criteria {
 	/* Positive criteria */
 	LAB_VIEW_CRITERIA_FULLSCREEN              = 1 << 1,
 	LAB_VIEW_CRITERIA_ALWAYS_ON_TOP           = 1 << 2,
+	LAB_VIEW_CRITERIA_ROOT_TOPLEVEL           = 1 << 3,
 
 	/* Negative criteria */
 	LAB_VIEW_CRITERIA_NO_ALWAYS_ON_TOP        = 1 << 6,
@@ -278,6 +306,13 @@ enum lab_view_criteria {
  * wlr_surface, or NULL if the surface has no associated view.
  */
 struct view *view_from_wlr_surface(struct wlr_surface *surface);
+
+/**
+ * view_query_create() - Create a new heap allocated view query with
+ * all members initialized to their default values (window_type = -1,
+ * NULL for strings)
+ */
+struct view_query *view_query_create(void);
 
 /**
  * view_query_free() - Free a given view query
@@ -323,6 +358,15 @@ bool view_matches_query(struct view *view, struct view_query *query);
 struct view *view_next(struct wl_list *head, struct view *view,
 	enum lab_view_criteria criteria);
 
+/*
+ * Same as `view_next()` except that they iterate one whole cycle rather than
+ * stopping at the list-head
+ */
+struct view *view_next_no_head_stop(struct wl_list *head, struct view *from,
+	enum lab_view_criteria criteria);
+struct view *view_prev_no_head_stop(struct wl_list *head, struct view *from,
+	enum lab_view_criteria criteria);
+
 /**
  * view_array_append() - Append views that match criteria to array
  * @server: server context
@@ -350,14 +394,7 @@ void view_array_append(struct server *server, struct wl_array *views,
 	enum lab_view_criteria criteria);
 
 enum view_wants_focus view_wants_focus(struct view *view);
-
-/**
- * view_is_focusable_from() - variant of view_is_focusable()
- * that takes into account the previously focused surface
- * @view: view to be checked
- * @prev_surface: previously focused surface
- */
-bool view_is_focusable_from(struct view *view, struct wlr_surface *prev);
+bool view_contains_window_type(struct view *view, enum window_type window_type);
 
 /**
  * view_edge_invert() - select the opposite of a provided edge
@@ -377,13 +414,10 @@ enum view_edge view_edge_invert(enum view_edge edge);
  *	a. that have been created but never mapped;
  *	b. set to NULL after client minimize-request.
  *
- * The only views that are allowed to be focusd are those that have a surface
+ * The only views that are allowed to be focused are those that have a surface
  * and have been mapped at some point since creation.
  */
-static inline bool
-view_is_focusable(struct view *view) {
-	return view_is_focusable_from(view, NULL);
-}
+bool view_is_focusable(struct view *view);
 
 void mappable_connect(struct mappable *mappable, struct wlr_surface *surface,
 	wl_notify_func_t notify_map, wl_notify_func_t notify_unmap);
@@ -431,10 +465,13 @@ int view_effective_height(struct view *view, bool use_pending);
 void view_center(struct view *view, const struct wlr_box *ref);
 
 /**
- * view_place_initial - apply initial placement strategy to view
+ * view_place_by_policy - apply placement strategy to view
  * @view: view to be placed
+ * @allow_cursor: set to false to ignore center-on-cursor policy
+ * @policy: placement policy to apply
  */
-void view_place_initial(struct view *view, bool allow_cursor);
+void view_place_by_policy(struct view *view, bool allow_cursor,
+	enum view_placement_policy);
 void view_constrain_size_to_that_of_usable_area(struct view *view);
 
 void view_restore_to(struct view *view, struct wlr_box geometry);
@@ -443,6 +480,7 @@ void view_maximize(struct view *view, enum view_axis axis,
 	bool store_natural_geometry);
 void view_set_fullscreen(struct view *view, bool fullscreen);
 void view_toggle_maximize(struct view *view, enum view_axis axis);
+bool view_wants_decorations(struct view *view);
 void view_toggle_decorations(struct view *view);
 
 bool view_is_always_on_top(struct view *view);
@@ -455,7 +493,9 @@ void view_toggle_visible_on_all_workspaces(struct view *view);
 bool view_is_tiled(struct view *view);
 bool view_is_floating(struct view *view);
 void view_move_to_workspace(struct view *view, struct workspace *workspace);
-void view_set_decorations(struct view *view, bool decorations);
+enum ssd_mode view_get_ssd_mode(struct view *view);
+void view_set_ssd_mode(struct view *view, enum ssd_mode mode);
+void view_set_decorations(struct view *view, enum ssd_mode mode, bool force_ssd);
 void view_toggle_fullscreen(struct view *view);
 void view_invalidate_last_layout_geometry(struct view *view);
 void view_adjust_for_layout_change(struct view *view);
@@ -472,13 +512,6 @@ void view_move_to_back(struct view *view);
 struct view *view_get_root(struct view *view);
 void view_append_children(struct view *view, struct wl_array *children);
 bool view_on_output(struct view *view, struct output *output);
-
-/**
- * view_is_related() - determine if view and surface are owned by the
- * same application/process. Currently only implemented for xwayland
- * views/surfaces.
- */
-bool view_is_related(struct view *view, struct wlr_surface *surface);
 
 /**
  * view_has_strut_partial() - returns true for views that reserve space
@@ -503,9 +536,11 @@ void view_on_output_destroy(struct view *view);
 void view_connect_map(struct view *view, struct wlr_surface *surface);
 void view_destroy(struct view *view);
 
-struct output *view_get_adjacent_output(struct view *view, enum view_edge edge);
+struct output *view_get_adjacent_output(struct view *view, enum view_edge edge,
+	bool wrap);
 enum view_axis view_axis_parse(const char *direction);
 enum view_edge view_edge_parse(const char *direction);
+enum view_placement_policy view_placement_parse(const char *policy);
 
 /* xdg.c */
 struct wlr_xdg_surface *xdg_surface_from_view(struct view *view);

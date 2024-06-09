@@ -1,7 +1,7 @@
 labwc_sources += files(
   'buf.c',
   'dir.c',
-  'fd_util.c',
+  'fd-util.c',
   'file-helpers.c',
   'font.c',
   'grab-file.c',
@@ -10,9 +10,11 @@ labwc_sources += files(
   'mem.c',
   'nodename.c',
   'parse-bool.c',
-  'scaled_font_buffer.c',
-  'scaled_scene_buffer.c',
+  'parse-double.c',
+  'scaled-font-buffer.c',
+  'scaled-scene-buffer.c',
   'scene-helpers.c',
+  'surface-helpers.c',
   'spawn.c',
   'string-helpers.c',
 )

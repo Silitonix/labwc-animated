@@ -9,8 +9,9 @@
 #include <wlr/types/wlr_touch.h>
 #include <wlr/util/log.h>
 #include "common/mem.h"
+#include "input/ime.h"
 #include "input/tablet.h"
-#include "input/tablet_pad.h"
+#include "input/tablet-pad.h"
 #include "input/input.h"
 #include "input/keyboard.h"
 #include "input/key-state.h"
@@ -98,7 +99,7 @@ configure_libinput(struct wlr_input_device *wlr_input_device)
 	 *       that some libinput setting could not be applied.
 	 *
 	 * TODO: We are currently using int32_t with -1 as default
-	 *       to desribe the not-configured state. This is not
+	 *       to describe the not-configured state. This is not
 	 *       really optimal as we can't properly deal with
 	 *       enum values that are 0. After some discussion via
 	 *       IRC the best way forward seem to be to use a
@@ -237,6 +238,15 @@ configure_libinput(struct wlr_input_device *wlr_input_device)
 		wlr_log(WLR_INFO, "send events mode configured");
 		libinput_device_config_send_events_set_mode(libinput_dev, dc->send_events_mode);
 	}
+
+	/* Non-zero if the device can be calibrated, zero otherwise. */
+	if (libinput_device_config_calibration_has_matrix(libinput_dev) == 0
+			|| !dc->have_calibration_matrix) {
+		wlr_log(WLR_INFO, "calibration matrix not configured");
+	} else {
+		wlr_log(WLR_INFO, "calibration matrix configured");
+		libinput_device_config_calibration_set_matrix(libinput_dev, dc->calibration_matrix);
+	}
 }
 
 static struct wlr_output *
@@ -295,6 +305,11 @@ new_keyboard(struct seat *seat, struct wlr_input_device *device, bool virtual)
 	keyboard->base.wlr_input_device = device;
 	keyboard->wlr_keyboard = kb;
 	keyboard->is_virtual = virtual;
+
+	if (!seat->keyboard_group->keyboard.keymap) {
+		wlr_log(WLR_ERROR, "cannot set keymap");
+		exit(EXIT_FAILURE);
+	}
 
 	wlr_keyboard_set_keymap(kb, seat->keyboard_group->keyboard.keymap);
 
@@ -382,6 +397,7 @@ seat_update_capabilities(struct seat *seat)
 			caps |= WL_SEAT_CAPABILITY_KEYBOARD;
 			break;
 		case WLR_INPUT_DEVICE_POINTER:
+		case WLR_INPUT_DEVICE_TABLET_TOOL:
 			caps |= WL_SEAT_CAPABILITY_POINTER;
 			break;
 		case WLR_INPUT_DEVICE_TOUCH:
@@ -474,20 +490,11 @@ focus_change_notify(struct wl_listener *listener, void *data)
 	struct wlr_surface *surface = event->new_surface;
 	struct view *view = surface ? view_from_wlr_surface(surface) : NULL;
 
-	/* Prevent focus switch to layershell client from updating view state */
-	if (surface && wlr_layer_surface_v1_try_from_wlr_surface(surface)) {
-		return;
-	}
-
 	/*
-	 * If an xwayland-unmanaged surface was focused belonging to the
-	 * same application as the focused view, allow the view to remain
-	 * active. This fixes an issue with menus immediately closing in
-	 * some X11 apps (try LibreOffice with SAL_USE_VCLPLUGIN=gen).
+	 * Prevent focus switch to non-view surface (e.g. layer-shell
+	 * or xwayland-unmanaged) from updating view state
 	 */
-	if (!view && server->active_view && event->new_surface
-			&& view_is_related(server->active_view,
-				event->new_surface)) {
+	if (surface && !view) {
 		return;
 	}
 
@@ -536,12 +543,17 @@ seat_init(struct server *server)
 		&seat->virtual_keyboard_new);
 	seat->virtual_keyboard_new.notify = new_virtual_keyboard;
 
+	seat->input_method_relay = input_method_relay_create(seat);
+
+	seat->xcursor_manager = NULL;
 	seat->cursor = wlr_cursor_create();
 	if (!seat->cursor) {
 		wlr_log(WLR_ERROR, "unable to create cursor");
 		exit(EXIT_FAILURE);
 	}
 	wlr_cursor_attach_output_layout(seat->cursor, server->output_layout);
+
+	wl_list_init(&seat->tablet_tools);
 
 	input_handlers_init(seat);
 }
@@ -559,6 +571,7 @@ seat_finish(struct server *server)
 	}
 
 	input_handlers_finish(seat);
+	input_method_relay_finish(seat->input_method_relay);
 }
 
 static void
@@ -577,6 +590,8 @@ seat_reconfigure(struct server *server)
 {
 	struct seat *seat = &server->seat;
 	struct input *input;
+	cursor_reload(seat);
+	overlay_reconfigure(seat);
 	wl_list_for_each(input, &seat->inputs, link) {
 		switch (input->wlr_input_device->type) {
 		case WLR_INPUT_DEVICE_KEYBOARD:
@@ -608,18 +623,28 @@ seat_focus(struct seat *seat, struct wlr_surface *surface, bool is_lock_surface)
 	 * lock screen may lose focus and become impossible to unlock.
 	 */
 	struct server *server = seat->server;
-	if (server->session_lock && !is_lock_surface) {
+	if (server->session_lock_manager->locked && !is_lock_surface) {
 		return;
 	}
 
 	if (!surface) {
 		wlr_seat_keyboard_notify_clear_focus(seat->seat);
+		input_method_relay_set_focus(seat->input_method_relay, NULL);
 		return;
 	}
 
 	/* Respect input inhibit (also used by some lock screens) */
 	if (input_inhibit_blocks_surface(seat, surface->resource)) {
 		return;
+	}
+
+	if (!wlr_seat_get_keyboard(seat->seat)) {
+		/*
+		 * wlr_seat_keyboard_notify_enter() sends wl_keyboard.modifiers,
+		 * but it may crash some apps (e.g. Chromium) if
+		 * wl_keyboard.keymap is not sent beforehand.
+		 */
+		wlr_seat_set_keyboard(seat->seat, &seat->keyboard_group->keyboard);
 	}
 
 	/*
@@ -635,6 +660,8 @@ seat_focus(struct seat *seat, struct wlr_surface *surface, bool is_lock_surface)
 	struct wlr_keyboard *kb = &seat->keyboard_group->keyboard;
 	wlr_seat_keyboard_notify_enter(seat->seat, surface,
 		pressed_sent_keycodes, nr_pressed_sent_keycodes, &kb->modifiers);
+
+	input_method_relay_set_focus(seat->input_method_relay, surface);
 
 	struct wlr_pointer_constraint_v1 *constraint =
 		wlr_pointer_constraints_v1_constraint_for_surface(server->constraints,
@@ -668,9 +695,7 @@ seat_set_focus_layer(struct seat *seat, struct wlr_layer_surface_v1 *layer)
 		return;
 	}
 	seat_focus(seat, layer->surface, /*is_lock_surface*/ false);
-	if (layer->current.layer >= ZWLR_LAYER_SHELL_V1_LAYER_TOP) {
-		seat->focused_layer = layer;
-	}
+	seat->focused_layer = layer;
 }
 
 static void

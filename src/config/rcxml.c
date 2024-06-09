@@ -2,6 +2,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include <assert.h>
 #include <fcntl.h>
+#include <glib.h>
 #include <libxml/parser.h>
 #include <libxml/tree.h>
 #include <stdbool.h>
@@ -20,13 +21,16 @@
 #include "common/mem.h"
 #include "common/nodename.h"
 #include "common/parse-bool.h"
+#include "common/parse-double.h"
 #include "common/string-helpers.h"
+#include "config/default-bindings.h"
 #include "config/keybind.h"
 #include "config/libinput.h"
 #include "config/mousebind.h"
 #include "config/tablet.h"
 #include "config/rcxml.h"
 #include "labwc.h"
+#include "osd.h"
 #include "regions.h"
 #include "view.h"
 #include "window-rules.h"
@@ -43,6 +47,7 @@ static bool in_window_rules;
 static bool in_action_query;
 static bool in_action_then_branch;
 static bool in_action_else_branch;
+static bool in_action_none_branch;
 
 static struct usable_area_override *current_usable_area_override;
 static struct keybind *current_keybind;
@@ -71,6 +76,45 @@ enum font_place {
 
 static void load_default_key_bindings(void);
 static void load_default_mouse_bindings(void);
+
+static int
+parse_window_type(const char *type)
+{
+	if (!type) {
+		return -1;
+	}
+	if (!strcasecmp(type, "desktop")) {
+		return NET_WM_WINDOW_TYPE_DESKTOP;
+	} else if (!strcasecmp(type, "dock")) {
+		return NET_WM_WINDOW_TYPE_DOCK;
+	} else if (!strcasecmp(type, "toolbar")) {
+		return NET_WM_WINDOW_TYPE_TOOLBAR;
+	} else if (!strcasecmp(type, "menu")) {
+		return NET_WM_WINDOW_TYPE_MENU;
+	} else if (!strcasecmp(type, "utility")) {
+		return NET_WM_WINDOW_TYPE_UTILITY;
+	} else if (!strcasecmp(type, "splash")) {
+		return NET_WM_WINDOW_TYPE_SPLASH;
+	} else if (!strcasecmp(type, "dialog")) {
+		return NET_WM_WINDOW_TYPE_DIALOG;
+	} else if (!strcasecmp(type, "dropdown_menu")) {
+		return NET_WM_WINDOW_TYPE_DROPDOWN_MENU;
+	} else if (!strcasecmp(type, "popup_menu")) {
+		return NET_WM_WINDOW_TYPE_POPUP_MENU;
+	} else if (!strcasecmp(type, "tooltip")) {
+		return NET_WM_WINDOW_TYPE_TOOLTIP;
+	} else if (!strcasecmp(type, "notification")) {
+		return NET_WM_WINDOW_TYPE_NOTIFICATION;
+	} else if (!strcasecmp(type, "combo")) {
+		return NET_WM_WINDOW_TYPE_COMBO;
+	} else if (!strcasecmp(type, "dnd")) {
+		return NET_WM_WINDOW_TYPE_DND;
+	} else if (!strcasecmp(type, "normal")) {
+		return NET_WM_WINDOW_TYPE_NORMAL;
+	} else {
+		return -1;
+	}
+}
 
 static void
 fill_usable_area_override(char *nodename, char *content)
@@ -122,6 +166,7 @@ fill_window_rule(char *nodename, char *content)
 {
 	if (!strcasecmp(nodename, "windowRule.windowRules")) {
 		current_window_rule = znew(*current_window_rule);
+		current_window_rule->window_type = -1; // Window types are >= 0
 		wl_list_append(&rc.window_rules, &current_window_rule->link);
 		wl_list_init(&current_window_rule->actions);
 		return;
@@ -140,8 +185,16 @@ fill_window_rule(char *nodename, char *content)
 	} else if (!strcmp(nodename, "title")) {
 		free(current_window_rule->title);
 		current_window_rule->title = xstrdup(content);
+	} else if (!strcmp(nodename, "type")) {
+		current_window_rule->window_type = parse_window_type(content);
 	} else if (!strcasecmp(nodename, "matchOnce")) {
 		set_bool(content, &current_window_rule->match_once);
+	} else if (!strcasecmp(nodename, "sandboxEngine")) {
+		free(current_window_rule->sandbox_engine);
+		current_window_rule->sandbox_engine = xstrdup(content);
+	} else if (!strcasecmp(nodename, "sandboxAppId")) {
+		free(current_window_rule->sandbox_app_id);
+		current_window_rule->sandbox_app_id = xstrdup(content);
 
 	/* Event */
 	} else if (!strcmp(nodename, "event")) {
@@ -162,6 +215,8 @@ fill_window_rule(char *nodename, char *content)
 		set_property(content, &current_window_rule->skip_window_switcher);
 	} else if (!strcasecmp(nodename, "ignoreFocusRequest")) {
 		set_property(content, &current_window_rule->ignore_focus_request);
+	} else if (!strcasecmp(nodename, "ignoreConfigureRequest")) {
+		set_property(content, &current_window_rule->ignore_configure_request);
 	} else if (!strcasecmp(nodename, "fixedPosition")) {
 		set_property(content, &current_window_rule->fixed_position);
 
@@ -184,7 +239,7 @@ static void
 fill_window_switcher_field(char *nodename, char *content)
 {
 	if (!strcasecmp(nodename, "field.fields.windowswitcher")) {
-		current_field = znew(*current_field);
+		current_field = osd_field_create();
 		wl_list_append(&rc.window_switcher.fields, &current_field->link);
 		return;
 	}
@@ -194,31 +249,8 @@ fill_window_switcher_field(char *nodename, char *content)
 		/* intentionally left empty */
 	} else if (!current_field) {
 		wlr_log(WLR_ERROR, "no <field>");
-	} else if (!strcmp(nodename, "content")) {
-		if (!strcmp(content, "type")) {
-			current_field->content = LAB_FIELD_TYPE;
-		} else if (!strcmp(content, "identifier")) {
-			current_field->content = LAB_FIELD_IDENTIFIER;
-		} else if (!strcmp(content, "app_id")) {
-			wlr_log(WLR_ERROR, "window-switcher field 'app_id' is deprecated");
-			current_field->content = LAB_FIELD_IDENTIFIER;
-		} else if (!strcmp(content, "trimmed_identifier")) {
-			current_field->content = LAB_FIELD_TRIMMED_IDENTIFIER;
-		} else if (!strcmp(content, "title")) {
-			current_field->content = LAB_FIELD_TITLE;
-		} else {
-			wlr_log(WLR_ERROR, "bad windowSwitcher field '%s'", content);
-		}
-	} else if (!strcmp(nodename, "width") && !strchr(content, '%')) {
-		wlr_log(WLR_ERROR, "Removing invalid field, %s='%s' misses"
-			" trailing %%", nodename, content);
-		wl_list_remove(&current_field->link);
-		zfree(current_field);
-	} else if (!strcmp(nodename, "width")) {
-		current_field->width = atoi(content);
 	} else {
-		wlr_log(WLR_ERROR, "Unexpected data in field parser: %s=\"%s\"",
-			nodename, content);
+		osd_field_arg_from_xml_node(current_field, nodename, content);
 	}
 }
 
@@ -263,6 +295,11 @@ fill_region(char *nodename, char *content)
 static void
 fill_action_query(char *nodename, char *content, struct action *action)
 {
+	if (!action) {
+		wlr_log(WLR_ERROR, "No parent action for query: %s=%s", nodename, content);
+		return;
+	}
+
 	string_truncate_at_pattern(nodename, ".keybind.keyboard");
 	string_truncate_at_pattern(nodename, ".mousebind.context.mouse");
 
@@ -282,7 +319,7 @@ fill_action_query(char *nodename, char *content, struct action *action)
 			action_arg_add_querylist(action, "query");
 			queries = action_get_querylist(action, "query");
 		}
-		current_view_query = znew(*current_view_query);
+		current_view_query = view_query_create();
 		wl_list_append(queries, &current_view_query->link);
 	}
 
@@ -290,6 +327,12 @@ fill_action_query(char *nodename, char *content, struct action *action)
 		current_view_query->identifier = xstrdup(content);
 	} else if (!strcasecmp(nodename, "title")) {
 		current_view_query->title = xstrdup(content);
+	} else if (!strcmp(nodename, "type")) {
+		current_view_query->window_type = parse_window_type(content);
+	} else if (!strcasecmp(nodename, "sandboxEngine")) {
+		current_view_query->sandbox_engine = xstrdup(content);
+	} else if (!strcasecmp(nodename, "sandboxAppId")) {
+		current_view_query->sandbox_app_id = xstrdup(content);
 	}
 }
 
@@ -297,10 +340,16 @@ static void
 fill_child_action(char *nodename, char *content, struct action *parent,
 	const char *branch_name)
 {
+	if (!parent) {
+		wlr_log(WLR_ERROR, "No parent action for branch: %s=%s", nodename, content);
+		return;
+	}
+
 	string_truncate_at_pattern(nodename, ".keybind.keyboard");
 	string_truncate_at_pattern(nodename, ".mousebind.context.mouse");
 	string_truncate_at_pattern(nodename, ".then.action");
 	string_truncate_at_pattern(nodename, ".else.action");
+	string_truncate_at_pattern(nodename, ".none.action");
 
 	if (!strcasecmp(nodename, "action")) {
 		current_child_action = NULL;
@@ -527,7 +576,7 @@ fill_libinput_category(char *nodename, char *content)
 	} else if (!strcasecmp(nodename, "leftHanded")) {
 		set_bool_as_int(content, &current_libinput_category->left_handed);
 	} else if (!strcasecmp(nodename, "pointerSpeed")) {
-		current_libinput_category->pointer_speed = atof(content);
+		set_float(content, &current_libinput_category->pointer_speed);
 		if (current_libinput_category->pointer_speed < -1) {
 			current_libinput_category->pointer_speed = -1;
 		} else if (current_libinput_category->pointer_speed > 1) {
@@ -602,6 +651,30 @@ fill_libinput_category(char *nodename, char *content)
 	} else if (!strcasecmp(nodename, "sendEventsMode")) {
 		current_libinput_category->send_events_mode =
 			get_send_events_mode(content);
+	} else if (!strcasecmp(nodename, "calibrationMatrix")) {
+		errno = 0;
+		current_libinput_category->have_calibration_matrix = true;
+		float *mat = current_libinput_category->calibration_matrix;
+		gchar **elements = g_strsplit(content, " ", -1);
+		guint i = 0;
+		for (; elements[i]; ++i) {
+			char *end_str = NULL;
+			mat[i] = strtof(elements[i], &end_str);
+			if (errno == ERANGE || *end_str != '\0' || i == 6 || *elements[i] == '\0') {
+				wlr_log(WLR_ERROR, "invalid calibration matrix element"
+									" %s (index %d), expect six floats",
+									elements[i], i);
+				current_libinput_category->have_calibration_matrix = false;
+				errno = 0;
+				break;
+			}
+		}
+		if (i != 6 && current_libinput_category->have_calibration_matrix) {
+			wlr_log(WLR_ERROR, "wrong number of calibration matrix elements,"
+								" expected 6, got %d", i);
+			current_libinput_category->have_calibration_matrix = false;
+		}
+		g_strfreev(elements);
 	}
 }
 
@@ -726,6 +799,9 @@ entry(xmlNode *node, char *nodename, char *content)
 		} else if (in_action_else_branch) {
 			fill_child_action(nodename, content,
 				current_keybind_action, "else");
+		} else if (in_action_none_branch) {
+			fill_child_action(nodename, content,
+				current_keybind_action, "none");
 		} else {
 			fill_keybind(nodename, content);
 		}
@@ -740,6 +816,9 @@ entry(xmlNode *node, char *nodename, char *content)
 		} else if (in_action_else_branch) {
 			fill_child_action(nodename, content,
 				current_mousebind_action, "else");
+		} else if (in_action_none_branch) {
+			fill_child_action(nodename, content,
+				current_mousebind_action, "none");
 		} else {
 			fill_mousebind(nodename, content);
 		}
@@ -814,11 +893,8 @@ entry(xmlNode *node, char *nodename, char *content)
 	} else if (!strcasecmp(nodename, "reuseOutputMode.core")) {
 		set_bool(content, &rc.reuse_output_mode);
 	} else if (!strcmp(nodename, "policy.placement")) {
-		if (!strcmp(content, "automatic")) {
-			rc.placement_policy = LAB_PLACE_AUTOMATIC;
-		} else if (!strcmp(content, "cursor")) {
-			rc.placement_policy = LAB_PLACE_CURSOR;
-		} else {
+		rc.placement_policy = view_placement_parse(content);
+		if (rc.placement_policy == LAB_PLACE_INVALID) {
 			rc.placement_policy = LAB_PLACE_CENTER;
 		}
 	} else if (!strcmp(nodename, "name.theme")) {
@@ -827,6 +903,8 @@ entry(xmlNode *node, char *nodename, char *content)
 		rc.corner_radius = atoi(content);
 	} else if (!strcasecmp(nodename, "keepBorder.theme")) {
 		set_bool(content, &rc.ssd_keep_border);
+	} else if (!strcasecmp(nodename, "dropShadows.theme")) {
+		set_bool(content, &rc.shadows_enabled);
 	} else if (!strcmp(nodename, "name.font.theme")) {
 		fill_font(nodename, content, font_place);
 	} else if (!strcmp(nodename, "size.font.theme")) {
@@ -849,7 +927,7 @@ entry(xmlNode *node, char *nodename, char *content)
 			wlr_log(WLR_ERROR, "invalid doubleClickTime");
 		}
 	} else if (!strcasecmp(nodename, "scrollFactor.mouse")) {
-		rc.scroll_factor = atof(content);
+		set_double(content, &rc.scroll_factor);
 	} else if (!strcasecmp(nodename, "name.context.mouse")) {
 		current_mouse_context = content;
 		current_mousebind = NULL;
@@ -872,6 +950,12 @@ entry(xmlNode *node, char *nodename, char *content)
 		rc.window_edge_strength = atoi(content);
 	} else if (!strcasecmp(nodename, "range.snapping")) {
 		rc.snap_edge_range = atoi(content);
+	} else if (!strcasecmp(nodename, "enabled.overlay.snapping")) {
+		set_bool(content, &rc.snap_overlay_enabled);
+	} else if (!strcasecmp(nodename, "inner.delay.overlay.snapping")) {
+		rc.snap_overlay_delay_inner = atoi(content);
+	} else if (!strcasecmp(nodename, "outer.delay.overlay.snapping")) {
+		rc.snap_overlay_delay_outer = atoi(content);
 	} else if (!strcasecmp(nodename, "topMaximize.snapping")) {
 		set_bool(content, &rc.snap_top_maximize);
 	} else if (!strcasecmp(nodename, "notifyClient.snapping")) {
@@ -894,6 +978,11 @@ entry(xmlNode *node, char *nodename, char *content)
 		set_bool(content, &rc.window_switcher.preview);
 	} else if (!strcasecmp(nodename, "outlines.windowSwitcher")) {
 		set_bool(content, &rc.window_switcher.outlines);
+	} else if (!strcasecmp(nodename, "allWorkspaces.windowSwitcher")) {
+		if (parse_bool(content, -1) == true) {
+			rc.window_switcher.criteria &=
+				~LAB_VIEW_CRITERIA_CURRENT_WORKSPACE;
+		}
 
 	/* Remove this long term - just a friendly warning for now */
 	} else if (strstr(nodename, "windowswitcher.core")) {
@@ -929,6 +1018,8 @@ entry(xmlNode *node, char *nodename, char *content)
 		rc.workspace_config.popuptime = atoi(content);
 	} else if (!strcasecmp(nodename, "number.desktops")) {
 		rc.workspace_config.min_nr_workspaces = MAX(1, atoi(content));
+	} else if (!strcasecmp(nodename, "prefix.desktops")) {
+		rc.workspace_config.prefix = xstrdup(content);
 	} else if (!strcasecmp(nodename, "popupShow.resize")) {
 		if (!strcasecmp(content, "Always")) {
 			rc.resize_indicator = LAB_RESIZE_INDICATOR_ALWAYS;
@@ -939,6 +1030,8 @@ entry(xmlNode *node, char *nodename, char *content)
 		} else {
 			wlr_log(WLR_ERROR, "Invalid value for <resize popupShow />");
 		}
+	} else if (!strcasecmp(nodename, "mouseEmulation.tablet")) {
+		set_bool(content, &rc.tablet.force_mouse_emulation);
 	} else if (!strcasecmp(nodename, "mapToOutput.tablet")) {
 		rc.tablet.output_name = xstrdup(content);
 	} else if (!strcasecmp(nodename, "rotate.tablet")) {
@@ -962,6 +1055,18 @@ entry(xmlNode *node, char *nodename, char *content)
 		} else {
 			wlr_log(WLR_ERROR, "Missing 'button' argument for tablet button mapping");
 		}
+	} else if (!strcasecmp(nodename, "ignoreButtonReleasePeriod.menu")) {
+		rc.menu_ignore_button_release_period = atoi(content);
+	} else if (!strcasecmp(nodename, "width.magnifier")) {
+		rc.mag_width = atoi(content);
+	} else if (!strcasecmp(nodename, "height.magnifier")) {
+		rc.mag_height = atoi(content);
+	} else if (!strcasecmp(nodename, "initScale.magnifier")) {
+		set_float(content, &rc.mag_scale);
+	} else if (!strcasecmp(nodename, "increment.magnifier")) {
+		set_float(content, &rc.mag_increment);
+	} else if (!strcasecmp(nodename, "useFilter.magnifier")) {
+		set_bool(content, &rc.mag_filter);
 	}
 }
 
@@ -1067,6 +1172,12 @@ xml_tree_walk(xmlNode *node)
 			in_action_else_branch = false;
 			continue;
 		}
+		if (!strcasecmp((char *)n->name, "none")) {
+			in_action_none_branch = true;
+			traverse(n);
+			in_action_none_branch = false;
+			continue;
+		}
 		traverse(n);
 	}
 }
@@ -1075,7 +1186,7 @@ xml_tree_walk(xmlNode *node)
 void
 rcxml_parse_xml(struct buf *b)
 {
-	xmlDoc *d = xmlParseMemory(b->buf, b->len);
+	xmlDoc *d = xmlParseMemory(b->data, b->len);
 	if (!d) {
 		wlr_log(WLR_ERROR, "error parsing config file");
 		return;
@@ -1116,6 +1227,7 @@ rcxml_init(void)
 	rc.xdg_shell_server_side_deco = true;
 	rc.ssd_keep_border = true;
 	rc.corner_radius = 8;
+	rc.shadows_enabled = false;
 
 	init_font_defaults(&rc.font_activewindow);
 	init_font_defaults(&rc.font_inactivewindow);
@@ -1129,6 +1241,7 @@ rcxml_init(void)
 	rc.doubleclick_time = 500;
 	rc.scroll_factor = 1.0;
 
+	rc.tablet.force_mouse_emulation = false;
 	rc.tablet.output_name = NULL;
 	rc.tablet.rotation = 0;
 	rc.tablet.box = (struct wlr_fbox){0};
@@ -1142,43 +1255,32 @@ rcxml_init(void)
 	rc.window_edge_strength = 20;
 
 	rc.snap_edge_range = 1;
+	rc.snap_overlay_enabled = true;
+	rc.snap_overlay_delay_inner = 500;
+	rc.snap_overlay_delay_outer = 500;
 	rc.snap_top_maximize = true;
 	rc.snap_tiling_events_mode = LAB_TILING_EVENTS_ALWAYS;
 
 	rc.window_switcher.show = true;
 	rc.window_switcher.preview = true;
 	rc.window_switcher.outlines = true;
+	rc.window_switcher.criteria = LAB_VIEW_CRITERIA_CURRENT_WORKSPACE
+		| LAB_VIEW_CRITERIA_ROOT_TOPLEVEL
+		| LAB_VIEW_CRITERIA_NO_SKIP_WINDOW_SWITCHER;
 
 	rc.resize_indicator = LAB_RESIZE_INDICATOR_NEVER;
 
 	rc.workspace_config.popuptime = INT_MIN;
 	rc.workspace_config.min_nr_workspaces = 1;
-}
 
-static struct {
-	const char *binding, *action, *attribute, *value;
-} key_combos[] = {
-	{ "A-Tab", "NextWindow", NULL, NULL },
-	{ "W-Return", "Execute", "command", "alacritty" },
-	{ "A-F3", "Execute", "command", "bemenu-run" },
-	{ "A-F4", "Close", NULL, NULL },
-	{ "W-a", "ToggleMaximize", NULL, NULL },
-	{ "A-Left", "MoveToEdge", "direction", "left" },
-	{ "A-Right", "MoveToEdge", "direction", "right" },
-	{ "A-Up", "MoveToEdge", "direction", "up" },
-	{ "A-Down", "MoveToEdge", "direction", "down" },
-	{ "W-Left", "SnapToEdge", "direction", "left" },
-	{ "W-Right", "SnapToEdge", "direction", "right" },
-	{ "W-Up", "SnapToEdge", "direction", "up" },
-	{ "W-Down", "SnapToEdge", "direction", "down" },
-	{ "A-Space", "ShowMenu", "menu", "client-menu"},
-	{ "XF86_AudioLowerVolume", "Execute", "command", "amixer sset Master 5%-" },
-	{ "XF86_AudioRaiseVolume", "Execute", "command", "amixer sset Master 5%+" },
-	{ "XF86_AudioMute", "Execute", "command", "amixer sset Master toggle" },
-	{ "XF86_MonBrightnessUp", "Execute", "command", "brightnessctl set +10%" },
-	{ "XF86_MonBrightnessDown", "Execute", "command", "brightnessctl set 10%-" },
-	{ NULL, NULL, NULL, NULL },
-};
+	rc.menu_ignore_button_release_period = 250;
+
+	rc.mag_width = 400;
+	rc.mag_height = 400;
+	rc.mag_scale = 2.0;
+	rc.mag_increment = 0.2;
+	rc.mag_filter = true;
+}
 
 static void
 load_default_key_bindings(void)
@@ -1186,96 +1288,26 @@ load_default_key_bindings(void)
 	struct keybind *k;
 	struct action *action;
 	for (int i = 0; key_combos[i].binding; i++) {
-		k = keybind_create(key_combos[i].binding);
+		struct key_combos *current = &key_combos[i];
+		k = keybind_create(current->binding);
 		if (!k) {
 			continue;
 		}
 
-		action = action_create(key_combos[i].action);
+		action = action_create(current->action);
 		wl_list_append(&k->actions, &action->link);
 
-		if (key_combos[i].attribute && key_combos[i].value) {
+		for (size_t j = 0; j < ARRAY_SIZE(current->attributes); j++) {
+			if (!current->attributes[j].name
+					|| !current->attributes[j].value) {
+				break;
+			}
 			action_arg_from_xml_node(action,
-				key_combos[i].attribute, key_combos[i].value);
+				current->attributes[j].name,
+				current->attributes[j].value);
 		}
 	}
 }
-
-/*
- * `struct mouse_combo` variable description and examples:
- *
- * | Variable  | Description                | Examples
- * |-----------|----------------------------|---------------------
- * | context   | context name               | Maximize, Root
- * | button    | mousebind button/direction | Left, Up
- * | event     | mousebind action           | Click, Scroll
- * | action    | action name                | ToggleMaximize, GoToDesktop
- * | attribute | action attribute           | to
- * | value     | action attribute value     | left
- *
- * <mouse>
- *   <context name="Maximize">
- *     <mousebind button="Left" action="Click">
- *       <action name="Focus"/>
- *       <action name="Raise"/>
- *       <action name="ToggleMaximize"/>
- *     </mousebind>
- *   </context>
- *   <context name="Root">
- *     <mousebind direction="Up" action="Scroll">
- *       <action name="GoToDesktop" to="left" wrap="yes"/>
- *     </mousebind>
- *   </context>
- * </mouse>
- */
-static struct mouse_combos {
-	const char *context, *button, *event, *action, *attribute, *value;
-} mouse_combos[] = {
-	{ "Left", "Left", "Drag", "Resize", NULL, NULL},
-	{ "Top", "Left", "Drag", "Resize", NULL, NULL},
-	{ "Bottom", "Left", "Drag", "Resize", NULL, NULL},
-	{ "Right", "Left", "Drag", "Resize", NULL, NULL},
-	{ "TLCorner", "Left", "Drag", "Resize", NULL, NULL},
-	{ "TRCorner", "Left", "Drag", "Resize", NULL, NULL},
-	{ "BRCorner", "Left", "Drag", "Resize", NULL, NULL},
-	{ "BLCorner", "Left", "Drag", "Resize", NULL, NULL},
-	{ "Frame", "A-Left", "Press", "Focus", NULL, NULL},
-	{ "Frame", "A-Left", "Press", "Raise", NULL, NULL},
-	{ "Frame", "A-Left", "Drag", "Move", NULL, NULL},
-	{ "Frame", "A-Right", "Press", "Focus", NULL, NULL},
-	{ "Frame", "A-Right", "Press", "Raise", NULL, NULL},
-	{ "Frame", "A-Right", "Drag", "Resize", NULL, NULL},
-	{ "Titlebar", "Left", "Press", "Focus", NULL, NULL},
-	{ "Titlebar", "Left", "Press", "Raise", NULL, NULL},
-	{ "Titlebar", "Up", "Scroll", "Unfocus", NULL, NULL},
-	{ "Titlebar", "Up", "Scroll", "Shade", NULL, NULL},
-	{ "Titlebar", "Down", "Scroll", "Unshade", NULL, NULL},
-	{ "Titlebar", "Down", "Scroll", "Focus", NULL, NULL},
-	{ "Title", "Left", "Drag", "Move", NULL, NULL },
-	{ "Title", "Left", "DoubleClick", "ToggleMaximize", NULL, NULL },
-	{ "TitleBar", "Right", "Click", "Focus", NULL, NULL},
-	{ "TitleBar", "Right", "Click", "Raise", NULL, NULL},
-	{ "Title", "Right", "Click", "ShowMenu", "menu", "client-menu"},
-	{ "Close", "Left", "Click", "Close", NULL, NULL },
-	{ "Iconify", "Left", "Click", "Iconify", NULL, NULL},
-	{ "Maximize", "Left", "Click", "ToggleMaximize", NULL, NULL},
-	{ "Maximize", "Right", "Click", "ToggleMaximize", "direction", "horizontal"},
-	{ "Maximize", "Middle", "Click", "ToggleMaximize", "direction", "vertical"},
-	{ "WindowMenu", "Left", "Click", "ShowMenu", "menu", "client-menu"},
-	{ "WindowMenu", "Right", "Click", "ShowMenu", "menu", "client-menu"},
-	{ "Root", "Left", "Press", "ShowMenu", "menu", "root-menu"},
-	{ "Root", "Right", "Press", "ShowMenu", "menu", "root-menu"},
-	{ "Root", "Middle", "Press", "ShowMenu", "menu", "root-menu"},
-	{ "Root", "Up", "Scroll", "GoToDesktop", "to", "left"},
-	{ "Root", "Down", "Scroll", "GoToDesktop", "to", "right"},
-	{ "Client", "Left", "Press", "Focus", NULL, NULL},
-	{ "Client", "Left", "Press", "Raise", NULL, NULL},
-	{ "Client", "Right", "Press", "Focus", NULL, NULL},
-	{ "Client", "Right", "Press", "Raise", NULL, NULL},
-	{ "Client", "Middle", "Press", "Focus", NULL, NULL},
-	{ "Client", "Middle", "Press", "Raise", NULL, NULL},
-	{ NULL, NULL, NULL, NULL, NULL, NULL },
-};
 
 static void
 load_default_mouse_bindings(void)
@@ -1283,9 +1315,8 @@ load_default_mouse_bindings(void)
 	uint32_t count = 0;
 	struct mousebind *m;
 	struct action *action;
-	struct mouse_combos *current;
 	for (int i = 0; mouse_combos[i].context; i++) {
-		current = &mouse_combos[i];
+		struct mouse_combos *current = &mouse_combos[i];
 		if (i == 0
 				|| strcmp(current->context, mouse_combos[i - 1].context)
 				|| strcmp(current->button, mouse_combos[i - 1].button)
@@ -1306,14 +1337,14 @@ load_default_mouse_bindings(void)
 		action = action_create(current->action);
 		wl_list_append(&m->actions, &action->link);
 
-		/*
-		 * Only one attribute/value (of string type) is required for the
-		 * built-in binds.  If more are required in the future, a
-		 * slightly more sophisticated approach will be needed.
-		 */
-		if (current->attribute && current->value) {
+		for (size_t j = 0; j < ARRAY_SIZE(current->attributes); j++) {
+			if (!current->attributes[j].name
+					|| !current->attributes[j].value) {
+				break;
+			}
 			action_arg_from_xml_node(action,
-				current->attribute, current->value);
+				current->attributes[j].name,
+				current->attributes[j].value);
 		}
 	}
 	wlr_log(WLR_DEBUG, "Loaded %u merged mousebinds", count);
@@ -1457,10 +1488,14 @@ post_processing(void)
 
 	int nr_workspaces = wl_list_length(&rc.workspace_config.workspaces);
 	if (nr_workspaces < rc.workspace_config.min_nr_workspaces) {
+		if (!rc.workspace_config.prefix) {
+			rc.workspace_config.prefix = xstrdup(_("Workspace"));
+		}
 		struct workspace *workspace;
 		for (int i = nr_workspaces; i < rc.workspace_config.min_nr_workspaces; i++) {
 			workspace = znew(*workspace);
-			workspace->name = strdup_printf("Workspace %d", i + 1);
+			workspace->name = strdup_printf("%s %d",
+				rc.workspace_config.prefix, i + 1);
 			wl_list_append(&rc.workspace_config.workspaces, &workspace->link);
 		}
 	}
@@ -1471,6 +1506,10 @@ post_processing(void)
 		wlr_log(WLR_INFO, "load default window switcher fields");
 		load_default_window_switcher_fields();
 	}
+
+	if (rc.mag_scale <= 0.0) {
+		rc.mag_scale = 1.0;
+	}
 }
 
 static void
@@ -1479,6 +1518,8 @@ rule_destroy(struct window_rule *rule)
 	wl_list_remove(&rule->link);
 	zfree(rule->identifier);
 	zfree(rule->title);
+	zfree(rule->sandbox_engine);
+	zfree(rule->sandbox_app_id);
 	action_list_free(&rule->actions);
 	zfree(rule);
 }
@@ -1547,13 +1588,24 @@ validate(void)
 	/* Window-rule criteria */
 	struct window_rule *rule, *rule_tmp;
 	wl_list_for_each_safe(rule, rule_tmp, &rc.window_rules, link) {
-		if (!rule->identifier && !rule->title) {
+		if (!rule->identifier && !rule->title && rule->window_type < 0
+				&& !rule->sandbox_engine && !rule->sandbox_app_id) {
 			wlr_log(WLR_ERROR, "Deleting rule %p as it has no criteria", rule);
 			rule_destroy(rule);
 		}
 	}
 
 	validate_actions();
+
+	/* OSD fields */
+	struct window_switcher_field *field, *field_tmp;
+	wl_list_for_each_safe(field, field_tmp, &rc.window_switcher.fields, link) {
+		if (!osd_field_validate(field)) {
+			wlr_log(WLR_ERROR, "Deleting invalid window switcher field %p", field);
+			wl_list_remove(&field->link);
+			osd_field_free(field);
+		}
+	}
 }
 
 void
@@ -1574,8 +1626,6 @@ rcxml_read(const char *filename)
 	}
 
 	/* Reading file into buffer before parsing - better for unit tests */
-	struct buf b;
-
 	bool should_merge_config = rc.merge_config;
 	struct wl_list *(*iter)(struct wl_list *list);
 	iter = should_merge_config ? paths_get_prev : paths_get_next;
@@ -1599,7 +1649,7 @@ rcxml_read(const char *filename)
 
 		wlr_log(WLR_INFO, "read config file %s", path->string);
 
-		buf_init(&b);
+		struct buf b = BUF_INIT;
 		char *line = NULL;
 		size_t len = 0;
 		while (getline(&line, &len, stream) != -1) {
@@ -1612,7 +1662,7 @@ rcxml_read(const char *filename)
 		zfree(line);
 		fclose(stream);
 		rcxml_parse_xml(&b);
-		zfree(b.buf);
+		buf_reset(&b);
 		if (!should_merge_config) {
 			break;
 		}
@@ -1630,6 +1680,7 @@ rcxml_finish(void)
 	zfree(rc.font_menuitem.name);
 	zfree(rc.font_osd.name);
 	zfree(rc.theme_name);
+	zfree(rc.workspace_config.prefix);
 
 	struct usable_area_override *area, *area_tmp;
 	wl_list_for_each_safe(area, area_tmp, &rc.usable_area_overrides, link) {
@@ -1682,7 +1733,7 @@ rcxml_finish(void)
 	struct window_switcher_field *field, *field_tmp;
 	wl_list_for_each_safe(field, field_tmp, &rc.window_switcher.fields, link) {
 		wl_list_remove(&field->link);
-		zfree(field);
+		osd_field_free(field);
 	}
 
 	struct window_rule *rule, *rule_tmp;

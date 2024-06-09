@@ -118,46 +118,121 @@ handle_output_destroy(struct wl_listener *listener, void *data)
 	wlr_layer_surface_v1_destroy(layer->scene_layer_surface->layer_surface);
 }
 
-static void
-process_keyboard_interactivity(struct lab_layer_surface *layer)
+static inline bool
+has_exclusive_interactivity(struct wlr_scene_layer_surface_v1 *scene)
 {
-	struct wlr_layer_surface_v1 *layer_surface = layer->scene_layer_surface->layer_surface;
-	struct seat *seat = &layer->server->seat;
+	return scene->layer_surface->current.keyboard_interactive
+		== ZWLR_LAYER_SURFACE_V1_KEYBOARD_INTERACTIVITY_EXCLUSIVE;
+}
 
-	if (layer_surface->current.keyboard_interactive
-			&& layer_surface->current.layer >= ZWLR_LAYER_SHELL_V1_LAYER_TOP) {
+/*
+ * Try to transfer focus to other layer-shell clients with exclusive focus on
+ * the output nearest to the cursor. If none exist (which is likely to generally
+ * be the case) just unset layer focus and try to give it to the topmost
+ * toplevel if one exists.
+ */
+static void
+try_to_focus_next_layer_or_toplevel(struct server *server)
+{
+	struct seat *seat = &server->seat;
+	struct output *output = output_nearest_to_cursor(server);
+
+	enum zwlr_layer_shell_v1_layer overlay = ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY;
+	enum zwlr_layer_shell_v1_layer top = ZWLR_LAYER_SHELL_V1_LAYER_TOP;
+	for (size_t i = overlay; i >= top; i--) {
+		struct wlr_scene_tree *tree = output->layer_tree[i];
+		struct wlr_scene_node *node;
 		/*
-		 * Give keyboard focus to surface if
-		 * - keyboard-interactivity is 'exclusive' or 'on-demand'; and
-		 * - surface is in top/overlay layers; and
-		 * - currently focused layer has a lower precedence
-		 *
-		 * In other words, when dealing with two surfaces with
-		 * exclusive/on-demand keyboard-interactivity (firstly the
-		 * currently focused 'focused_layer' and secondly the
-		 * 'layer_surface' for which we're just responding to a
-		 * map/commit event), the following logic applies:
-		 *
-		 * | focused_layer | layer_surface | who gets keyboard focus |
-		 * |---------------|---------------|-------------------------|
-		 * | overlay       | top           | focused_layer           |
-		 * | overlay       | overlay       | layer_surface           |
-		 * | top           | top           | layer_surface           |
-		 * | top           | overlay       | layer_surface           |
+		 * In wlr_scene.c they were added at end of list so we
+		 * iterate in reverse to process last client first.
 		 */
-
-		if (!seat->focused_layer || seat->focused_layer->current.layer
-				<= layer_surface->current.layer) {
-			seat_set_focus_layer(seat, layer_surface);
+		wl_list_for_each_reverse(node, &tree->children, link) {
+			struct lab_layer_surface *layer = node_layer_surface_from_node(node);
+			struct wlr_scene_layer_surface_v1 *scene = layer->scene_layer_surface;
+			struct wlr_layer_surface_v1 *layer_surface = scene->layer_surface;
+			/*
+			 * In case we have just come from the unmap handler and
+			 * the commit has not yet been processed.
+			 */
+			if (!layer_surface->surface->mapped) {
+				continue;
+			}
+			if (has_exclusive_interactivity(scene)) {
+				wlr_log(WLR_DEBUG, "focus next exclusive layer client");
+				seat_set_focus_layer(seat, layer_surface);
+				return;
+			}
 		}
-	} else if (seat->focused_layer
-			&& !seat->focused_layer->current.keyboard_interactive) {
-		/*
-		 * Clear focus if keyboard-interactivity has been set to
-		 * ZWLR_LAYER_SURFACE_V1_KEYBOARD_INTERACTIVITY_NONE
-		 */
+	}
+
+	/*
+	 * Unfocus the current layer-surface and focus the topmost toplevel if
+	 * one exists on the current workspace.
+	 */
+	if (seat->focused_layer) {
 		seat_set_focus_layer(seat, NULL);
 	}
+}
+
+static bool
+focused_layer_has_exclusive_interactivity(struct seat *seat)
+{
+	if (!seat->focused_layer) {
+		return false;
+	}
+	return seat->focused_layer->current.keyboard_interactive ==
+		ZWLR_LAYER_SURFACE_V1_KEYBOARD_INTERACTIVITY_EXCLUSIVE;
+}
+
+/*
+ * Precedence is defined as being in the same or higher (overlay is highest)
+ * than the layer with current keyboard focus.
+ */
+static bool
+has_precedence(struct seat *seat, enum zwlr_layer_shell_v1_layer layer)
+{
+	if (!seat->focused_layer) {
+		return true;
+	}
+	if (!focused_layer_has_exclusive_interactivity(seat)) {
+		return true;
+	}
+	if (layer >= seat->focused_layer->current.layer) {
+		return true;
+	}
+	return false;
+}
+
+void
+layer_try_set_focus(struct seat *seat, struct wlr_layer_surface_v1 *layer_surface)
+{
+	switch (layer_surface->current.keyboard_interactive) {
+	case ZWLR_LAYER_SURFACE_V1_KEYBOARD_INTERACTIVITY_EXCLUSIVE:
+		wlr_log(WLR_DEBUG, "interactive-exclusive '%p'", layer_surface);
+		if (has_precedence(seat, layer_surface->current.layer)) {
+			seat_set_focus_layer(seat, layer_surface);
+		}
+		break;
+	case ZWLR_LAYER_SURFACE_V1_KEYBOARD_INTERACTIVITY_ON_DEMAND:
+		wlr_log(WLR_DEBUG, "interactive-on-demand '%p'", layer_surface);
+		if (!focused_layer_has_exclusive_interactivity(seat)) {
+			seat_set_focus_layer(seat, layer_surface);
+		}
+		break;
+	case ZWLR_LAYER_SURFACE_V1_KEYBOARD_INTERACTIVITY_NONE:
+		wlr_log(WLR_DEBUG, "interactive-none '%p'", layer_surface);
+		if (seat->focused_layer == layer_surface) {
+			try_to_focus_next_layer_or_toplevel(seat->server);
+		}
+		break;
+	}
+}
+
+static bool
+is_on_demand(struct wlr_layer_surface_v1 *layer_surface)
+{
+	return layer_surface->current.keyboard_interactive ==
+		ZWLR_LAYER_SURFACE_V1_KEYBOARD_INTERACTIVITY_ON_DEMAND;
 }
 
 static void
@@ -184,8 +259,28 @@ handle_surface_commit(struct wl_listener *listener, void *data)
 	}
 	/* Process keyboard-interactivity change */
 	if (committed & WLR_LAYER_SURFACE_V1_STATE_KEYBOARD_INTERACTIVITY) {
-		process_keyboard_interactivity(layer);
+		/*
+		 * On-demand interactivity should only be honoured through
+		 * normal focus semantics (for example by surface receiving
+		 * cursor-button-press).
+		 */
+		if (is_on_demand(layer_surface)) {
+			struct seat *seat = &layer->server->seat;
+			if (seat->focused_layer == layer_surface) {
+				/*
+				 * Must be change from EXCLUSIVE to ON_DEMAND,
+				 * so we should give us focus.
+				 */
+				struct server *server = layer->server;
+				try_to_focus_next_layer_or_toplevel(server);
+			}
+			goto out;
+		}
+		/* Handle EXCLUSIVE and NONE requests */
+		struct seat *seat = &layer->server->seat;
+		layer_try_set_focus(seat, layer_surface);
 	}
+out:
 
 	if (committed || layer->mapped != layer_surface->surface->mapped) {
 		layer->mapped = layer_surface->surface->mapped;
@@ -203,7 +298,6 @@ handle_node_destroy(struct wl_listener *listener, void *data)
 {
 	struct lab_layer_surface *layer =
 		wl_container_of(listener, layer, node_destroy);
-
 	/*
 	 * TODO: Determine if this layer is being used by an exclusive client.
 	 * If it is, try and find another layer owned by this client to pass
@@ -230,7 +324,7 @@ handle_unmap(struct wl_listener *listener, void *data)
 	}
 	struct seat *seat = &layer->server->seat;
 	if (seat->focused_layer == layer_surface) {
-		seat_set_focus_layer(seat, NULL);
+		try_to_focus_next_layer_or_toplevel(layer->server);
 	}
 }
 
@@ -243,6 +337,7 @@ handle_map(struct wl_listener *listener, void *data)
 	if (wlr_output) {
 		output_update_usable_area(wlr_output->data);
 	}
+
 	/*
 	 * Since moving to the wlroots scene-graph API, there is no need to
 	 * call wlr_surface_send_enter() from here since that will be done
@@ -250,7 +345,8 @@ handle_map(struct wl_listener *listener, void *data)
 	 * the scene. See wlr_scene_surface_create() documentation.
 	 */
 
-	process_keyboard_interactivity(layer);
+	struct seat *seat = &layer->server->seat;
+	layer_try_set_focus(seat, layer->scene_layer_surface->layer_surface);
 }
 
 static void
@@ -298,6 +394,10 @@ create_popup(struct wlr_xdg_popup *wlr_popup, struct wlr_scene_tree *parent)
 		free(popup);
 		return NULL;
 	}
+
+	/* In support of IME popup */
+	wlr_popup->base->surface->data = popup->scene_tree;
+
 	node_descriptor_create(&popup->scene_tree->node,
 		LAB_NODE_DESC_LAYER_POPUP, popup);
 
@@ -322,6 +422,13 @@ popup_handle_new_popup(struct wl_listener *listener, void *data)
 	struct wlr_xdg_popup *wlr_popup = data;
 	struct lab_layer_popup *new_popup = create_popup(wlr_popup,
 		lab_layer_popup->scene_tree);
+
+	if (!new_popup) {
+		wl_resource_post_no_memory(wlr_popup->resource);
+		wlr_xdg_popup_destroy(wlr_popup);
+		return;
+	}
+
 	new_popup->output_toplevel_sx_box =
 		lab_layer_popup->output_toplevel_sx_box;
 }
@@ -381,6 +488,12 @@ handle_new_popup(struct wl_listener *listener, void *data)
 		.height = output_box.height,
 	};
 	struct lab_layer_popup *popup = create_popup(wlr_popup, surface->tree);
+	if (!popup) {
+		wl_resource_post_no_memory(wlr_popup->resource);
+		wlr_xdg_popup_destroy(wlr_popup);
+		return;
+	}
+
 	popup->output_toplevel_sx_box = output_toplevel_sx_box;
 
 	if (surface->layer_surface->current.layer
@@ -423,6 +536,9 @@ handle_new_layer_surface(struct wl_listener *listener, void *data)
 		wlr_log(WLR_ERROR, "could not create layer surface");
 		return;
 	}
+
+	/* In support of IME popup */
+	layer_surface->surface->data = surface->scene_layer_surface->tree;
 
 	node_descriptor_create(&surface->scene_layer_surface->tree->node,
 		LAB_NODE_DESC_LAYER_SURFACE, surface);

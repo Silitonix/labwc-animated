@@ -4,6 +4,7 @@
 #include "common/graphic-helpers.h"
 #include "common/scene-helpers.h"
 #include "debug.h"
+#include "input/ime.h"
 #include "labwc.h"
 #include "node.h"
 #include "ssd.h"
@@ -18,6 +19,7 @@
 #define IGNORE_SSD true
 #define IGNORE_MENU true
 #define IGNORE_OSD_PREVIEW_OUTLINE true
+#define IGNORE_SNAPPING_PREVIEW_OUTLINE true
 
 static struct view *last_view;
 
@@ -136,10 +138,20 @@ get_special(struct server *server, struct wlr_scene_node *node)
 	if (node == &server->seat.drag.icons->node) {
 		return "seat->drag.icons";
 	}
-	if (server->seat.region_overlay.tree
-			&& node == &server->seat.region_overlay.tree->node) {
+	if (server->seat.overlay.region_rect.tree
+			&& node == &server->seat.overlay.region_rect.tree->node) {
 		/* Created on-demand */
-		return "seat->region_overlay";
+		return "seat->overlay.region_rect";
+	}
+	if (server->seat.overlay.edge_rect.tree
+			&& node == &server->seat.overlay.edge_rect.tree->node) {
+		/* Created on-demand */
+		return "seat->overlay.edge_rect";
+	}
+	if (server->seat.input_method_relay->popup_tree
+			&& node == &server->seat.input_method_relay->popup_tree->node) {
+		/* Created on-demand */
+		return "seat->im_relay->popup_tree";
 	}
 	if (server->osd_state.preview_outline
 			&& node == &server->osd_state.preview_outline->tree->node) {
@@ -207,11 +219,23 @@ dump_tree(struct server *server, struct wlr_scene_node *node,
 	}
 	printf("%.*s %*c %4d  %4d  [%p]\n", max_width - 1, type, padding, ' ', x, y, node);
 
+	struct multi_rect *osd_preview_outline =
+		server->osd_state.preview_outline;
+	struct multi_rect *region_snapping_overlay_outline =
+		server->seat.overlay.region_rect.border_rect;
+	struct multi_rect *edge_snapping_overlay_outline =
+		server->seat.overlay.edge_rect.border_rect;
 	if ((IGNORE_MENU && node == &server->menu_tree->node)
 			|| (IGNORE_SSD && last_view
 				&& ssd_debug_is_root_node(last_view->ssd, node))
-			|| (IGNORE_OSD_PREVIEW_OUTLINE && server->osd_state.preview_outline
-				&& node == &server->osd_state.preview_outline->tree->node)) {
+			|| (IGNORE_OSD_PREVIEW_OUTLINE && osd_preview_outline
+				&& node == &osd_preview_outline->tree->node)
+			|| (IGNORE_SNAPPING_PREVIEW_OUTLINE
+				&& region_snapping_overlay_outline
+				&& node == &region_snapping_overlay_outline->tree->node)
+			|| (IGNORE_SNAPPING_PREVIEW_OUTLINE
+				&& edge_snapping_overlay_outline
+				&& node == &edge_snapping_overlay_outline->tree->node)) {
 		printf("%*c%s\n", pos + 4 + INDENT_SIZE, ' ', "<skipping children>");
 		return;
 	}

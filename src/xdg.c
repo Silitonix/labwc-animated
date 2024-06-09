@@ -8,6 +8,7 @@
 #include "decorations.h"
 #include "labwc.h"
 #include "node.h"
+#include "snap-constraints.h"
 #include "view.h"
 #include "view-impl-common.h"
 #include "window-rules.h"
@@ -42,6 +43,28 @@ xdg_toplevel_from_view(struct view *view)
 	return xdg_surface->toplevel;
 }
 
+static bool
+xdg_toplevel_view_contains_window_type(struct view *view, int32_t window_type)
+{
+	assert(view);
+
+	struct wlr_xdg_toplevel *toplevel = xdg_toplevel_from_view(view);
+	struct wlr_xdg_toplevel_state *state = &toplevel->current;
+	bool is_dialog = (state->min_width != 0 && state->min_height != 0
+		&& (state->min_width == state->max_width
+		|| state->min_height == state->max_height))
+		|| toplevel->parent;
+
+	switch (window_type) {
+	case NET_WM_WINDOW_TYPE_NORMAL:
+		return !is_dialog;
+	case NET_WM_WINDOW_TYPE_DIALOG:
+		return is_dialog;
+	default:
+		return false;
+	}
+}
+
 static void
 handle_new_popup(struct wl_listener *listener, void *data)
 {
@@ -50,37 +73,6 @@ handle_new_popup(struct wl_listener *listener, void *data)
 	struct view *view = &xdg_toplevel_view->base;
 	struct wlr_xdg_popup *wlr_popup = data;
 	xdg_popup_create(view, wlr_popup);
-}
-
-static bool
-has_ssd(struct view *view)
-{
-	/* Window-rules take priority if they exist for this view */
-	switch (window_rules_get_property(view, "serverDecoration")) {
-	case LAB_PROP_TRUE:
-		return true;
-	case LAB_PROP_FALSE:
-		return false;
-	default:
-		break;
-	}
-
-	/*
-	 * view->ssd_preference may be set by the decoration implementation
-	 * e.g. src/decorations/xdg-deco.c or src/decorations/kde-deco.c.
-	 */
-	switch (view->ssd_preference) {
-	case LAB_SSD_PREF_SERVER:
-		return true;
-	case LAB_SSD_PREF_CLIENT:
-		return false;
-	default:
-		/*
-		 * We don't know anything about the client preference
-		 * so fall back to core.decoration settings in rc.xml
-		 */
-		return rc.xdg_shell_server_side_deco;
-	}
 }
 
 static void
@@ -141,6 +133,7 @@ handle_commit(struct wl_listener *listener, void *data)
 		 * actual view.
 		 */
 		if (!view->pending_configure_serial) {
+			snap_constraints_update(view);
 			view->pending = view->current;
 
 			/*
@@ -148,7 +141,7 @@ handle_commit(struct wl_listener *listener, void *data)
 			 * wlr_xdg_toplevel_set_size and will send the retained
 			 * values with every subsequent configure request. If a
 			 * client has resized itself in the meantime, a
-			 * configure request that sends the now-outated size
+			 * configure request that sends the now-outdated size
 			 * may prompt the client to resize itself unexpectedly.
 			 *
 			 * Calling wlr_xdg_toplevel_set_size to update the
@@ -188,6 +181,7 @@ handle_configure_timeout(void *data)
 		view->current.width, view->current.height);
 
 	/* Re-sync pending view with current state */
+	snap_constraints_update(view);
 	view->pending = view->current;
 
 	return 0; /* ignored per wl_event_loop docs */
@@ -236,13 +230,14 @@ handle_request_move(struct wl_listener *listener, void *data)
 	 * This event is raised when a client would like to begin an interactive
 	 * move, typically because the user clicked on their client-side
 	 * decorations. Note that a more sophisticated compositor should check
-	 * the provied serial against a list of button press serials sent to
-	 * this
-	 * client, to prevent the client from requesting this whenever they
+	 * the provided serial against a list of button press serials sent to
+	 * this client, to prevent the client from requesting this whenever they
 	 * want.
 	 */
 	struct view *view = wl_container_of(listener, view, request_move);
-	interactive_begin(view, LAB_INPUT_STATE_MOVE, 0);
+	if (view == view->server->seat.pressed.view) {
+		interactive_begin(view, LAB_INPUT_STATE_MOVE, 0);
+	}
 }
 
 static void
@@ -252,14 +247,15 @@ handle_request_resize(struct wl_listener *listener, void *data)
 	 * This event is raised when a client would like to begin an interactive
 	 * resize, typically because the user clicked on their client-side
 	 * decorations. Note that a more sophisticated compositor should check
-	 * the provied serial against a list of button press serials sent to
-	 * this
-	 * client, to prevent the client from requesting this whenever they
+	 * the provided serial against a list of button press serials sent to
+	 * this client, to prevent the client from requesting this whenever they
 	 * want.
 	 */
 	struct wlr_xdg_toplevel_resize_event *event = data;
 	struct view *view = wl_container_of(listener, view, request_resize);
-	interactive_begin(view, LAB_INPUT_STATE_RESIZE, event->edges);
+	if (view == view->server->seat.pressed.view) {
+		interactive_begin(view, LAB_INPUT_STATE_RESIZE, event->edges);
+	}
 }
 
 static void
@@ -503,7 +499,7 @@ set_initial_position(struct view *view)
 	}
 
 	/* All other views are placed according to a configured strategy */
-	view_place_initial(view, /* allow_cursor */ true);
+	view_place_by_policy(view, /* allow_cursor */ true, rc.placement_policy);
 }
 
 static const char *
@@ -572,7 +568,11 @@ xdg_toplevel_view_map(struct view *view)
 
 		init_foreign_toplevel(view);
 
-		view_set_decorations(view, has_ssd(view));
+		if (view_wants_decorations(view)) {
+			view_set_ssd_mode(view, LAB_SSD_MODE_FULL);
+		} else {
+			view_set_ssd_mode(view, LAB_SSD_MODE_NONE);
+		}
 
 		/*
 		 * Set initial "pending" dimensions (may be modified by
@@ -632,6 +632,20 @@ xdg_toplevel_view_unmap(struct view *view, bool client_request)
 	}
 }
 
+static pid_t
+xdg_view_get_pid(struct view *view)
+{
+	assert(view);
+	pid_t pid = -1;
+
+	if (view->surface && view->surface->resource
+			&& view->surface->resource->client) {
+		struct wl_client *client = view->surface->resource->client;
+		wl_client_get_credentials(client, &pid, NULL, NULL);
+	}
+	return pid;
+}
+
 static const struct view_impl xdg_toplevel_view_impl = {
 	.configure = xdg_toplevel_view_configure,
 	.close = xdg_toplevel_view_close,
@@ -647,6 +661,8 @@ static const struct view_impl xdg_toplevel_view_impl = {
 	.move_to_back = view_impl_move_to_back,
 	.get_root = xdg_toplevel_view_get_root,
 	.append_children = xdg_toplevel_view_append_children,
+	.contains_window_type = xdg_toplevel_view_contains_window_type,
+	.get_pid = xdg_view_get_pid,
 };
 
 static void
@@ -679,6 +695,11 @@ xdg_activation_handle_request(struct wl_listener *listener, void *data)
 
 	if (window_rules_get_property(view, "ignoreFocusRequest") == LAB_PROP_TRUE) {
 		wlr_log(WLR_INFO, "Ignoring focus request due to window rule configuration");
+		return;
+	}
+
+	if (view->server->osd_state.cycle_view) {
+		wlr_log(WLR_INFO, "Preventing focus request while in window switcher");
 		return;
 	}
 
@@ -771,7 +792,7 @@ xdg_surface_new(struct wl_listener *listener, void *data)
 	 */
 	kde_server_decoration_set_view(view, xdg_surface->surface);
 
-	/* In support of xdg popups */
+	/* In support of xdg popups and IME popup */
 	xdg_surface->surface->data = tree;
 
 	view_connect_map(view, xdg_surface->surface);

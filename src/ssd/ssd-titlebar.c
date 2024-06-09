@@ -5,7 +5,7 @@
 #include <string.h>
 #include "buffer.h"
 #include "common/mem.h"
-#include "common/scaled_font_buffer.h"
+#include "common/scaled-font-buffer.h"
 #include "common/scene-helpers.h"
 #include "common/string-helpers.h"
 #include "labwc.h"
@@ -99,11 +99,16 @@ ssd_titlebar_create(struct ssd *ssd)
 		add_scene_button(&subtree->parts, LAB_SSD_BUTTON_ICONIFY, parent,
 			color, iconify_button_unpressed, iconify_button_hover,
 			width - SSD_BUTTON_WIDTH * 3, view);
-		add_scene_button(&subtree->parts, LAB_SSD_BUTTON_MAXIMIZE, parent,
+
+		/* Maximize button has an alternate state when maximized */
+		struct ssd_part *btn_max_root = add_scene_button(
+			&subtree->parts, LAB_SSD_BUTTON_MAXIMIZE, parent,
 			color, maximize_button_unpressed, maximize_button_hover,
 			width - SSD_BUTTON_WIDTH * 2, view);
-		add_toggled_icon(&subtree->parts, LAB_SSD_BUTTON_MAXIMIZE,
+		struct ssd_button *btn_max = node_ssd_button_from_node(btn_max_root->node);
+		add_toggled_icon(btn_max, &subtree->parts, LAB_SSD_BUTTON_MAXIMIZE,
 			restore_button_unpressed, restore_button_hover);
+
 		add_scene_button_corner(&subtree->parts,
 			LAB_SSD_BUTTON_CLOSE, LAB_SSD_PART_CORNER_TOP_RIGHT, parent,
 			corner_top_right, close_button_unpressed, close_button_hover,
@@ -334,7 +339,8 @@ ssd_update_title(struct ssd *ssd)
 	struct ssd_state_title *state = &ssd->state.title;
 	bool title_unchanged = state->text && !strcmp(title, state->text);
 
-	float *text_color;
+	const float *text_color;
+	const float *bg_color;
 	struct font *font = NULL;
 	struct ssd_part *part;
 	struct ssd_sub_tree *subtree;
@@ -346,10 +352,12 @@ ssd_update_title(struct ssd *ssd)
 		if (subtree == &ssd->titlebar.active) {
 			dstate = &state->active;
 			text_color = theme->window_active_label_text_color;
+			bg_color = theme->window_active_title_bg_color;
 			font = &rc.font_activewindow;
 		} else {
 			dstate = &state->inactive;
 			text_color = theme->window_inactive_label_text_color;
+			bg_color = theme->window_inactive_title_bg_color;
 			font = &rc.font_inactivewindow;
 		}
 
@@ -379,7 +387,7 @@ ssd_update_title(struct ssd *ssd)
 		if (part->buffer) {
 			scaled_font_buffer_update(part->buffer, title,
 				title_bg_width, font,
-				text_color, NULL);
+				text_color, bg_color, NULL);
 		}
 
 		/* And finally update the cache */

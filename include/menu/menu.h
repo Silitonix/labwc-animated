@@ -29,6 +29,8 @@ struct menu_scene {
 
 struct menuitem {
 	struct wl_list actions;
+	char *execute;
+	char *id; /* needed for pipemenus */
 	struct menu *parent;
 	struct menu *submenu;
 	bool selectable;
@@ -46,6 +48,7 @@ struct menu {
 	char *label;
 	int item_height;
 	struct menu *parent;
+
 	struct {
 		int width;
 		int height;
@@ -57,6 +60,8 @@ struct menu {
 		struct menuitem *item;
 	} selection;
 	struct wlr_scene_tree *scene_tree;
+	bool is_pipemenu;
+	enum menu_align align;
 
 	/* Used to match a window-menu to the view that triggered it. */
 	struct view *triggered_by_view;  /* may be NULL */
@@ -81,14 +86,14 @@ void menu_finish(struct server *server);
 struct menu *menu_get_by_id(struct server *server, const char *id);
 
 /**
- * menu_open - open menu on position (x, y)
+ * menu_open_root - open menu on position (x, y)
  *
  * This function will close server->menu_current, open the
  * new menu and assign @menu to server->menu_current.
  *
  * Additionally, server->input_mode wil be set to LAB_INPUT_STATE_MENU.
  */
-void menu_open(struct menu *menu, int x, int y);
+void menu_open_root(struct menu *menu, int x, int y);
 
 /**
  * menu_process_cursor_motion

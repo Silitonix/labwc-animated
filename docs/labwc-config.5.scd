@@ -8,7 +8,7 @@ labwc - configuration files
 
 Labwc uses openbox-3.6 specification for configuration and theming, but does not
 support all options. The following files form the basis of the labwc
-configuration: rc.xml, menu.xml, autostart and environment.
+configuration: rc.xml, menu.xml, autostart, shutdown and environment.
 
 No configuration files are needed to start and run labwc.
 
@@ -31,22 +31,42 @@ file encountered is processed in turn. Thus, user-specific files will augment
 system-wide configurations, with conflicts favoring the user-specific
 alternative.
 
-The configuration directory location can be override with the -C command line
+The configuration directory location can be overridden with the -C command line
 option.
 
-All configuration and theme files except autostart are re-loaded on receiving
-signal SIGHUP.
+All configuration and theme files except autostart and shutdown are re-loaded on
+receiving signal SIGHUP.
 
-The *autostart* file is executed as a shell script. This is the place for
-executing clients for handling background images, panels and similar.
+Environment variables may be set within *environment* files, wherein each line
+defines shell variables in the format *variable=value*. It is recommended to
+specify keyboard layout settings and cursor size/theme here; see environment
+variable section below for details. Within an XDG Base Directory, a file named
+"environment" will be parsed first, followed by any file matching the glob
+"environment.d/\*.env". Files within the environment.d directory are parsed in
+alphabetical order. Unless the --merge-config option is specified, labwc will
+consider a particular XDG Base Directory to have provided an environment file if
+that directory contains either the "environment" file or at least one
+"environment.d/\*.env" file.
 
-The *environment* file is parsed as *variable=value* and sets environment
-variables accordingly. It is recommended to specify keyboard layout settings and
-cursor size/theme here; see environment variable section below for details. Note
-that the environment file is treated differently by openbox where it is simply
-sourced prior to running openbox.
-Note: Tilde (~) and environment variables in the value are expanded, but
-subshell syntax and apostrophes are ignored.
+Note: environment files are treated differently by Openbox, which will simply
+source the file as a valid shell script before running the window manager. Files
+are instead parsed directly by labwc, although any environment variables
+referenced as $VARIABLE or ${VARIABLE} will be substituted and the tilde (~)
+will be expanded as the user's home directory.
+
+The *autostart* file is executed as a shell script after labwc has read its
+configuration and set variables defined in the environment file. Additionally,
+the environment variables WAYLAND_DISPLAY and (when labwc is built with Xwayland
+support) DISPLAY will be defined. This is the place for executing clients for
+handling background images, panels and other tasks that should run automatically
+when labwc launches.
+
+The *shutdown* file is executed as a shell script when labwc is preparing to
+terminate itself. All environment variables, including WAYLAND_DISPLAY and
+DISPLAY, will be available to the script. However, because the script runs
+asynchronously with other termination tasks, the shutdown file should not assume
+that the display will be usable. This file is useful to perform any custom
+operations necessary to finalize a labwc session.
 
 The *menu.xml* file defines the context/root-menus and is described in
 labwc-menu(5).
@@ -77,7 +97,26 @@ Configuration must be wrapped in a <labwc_config> root-element like this:
 
 *labwc* parses XML in an element/attribute agnostic way. This is a design
 decision to increase config file flexibility and keep code simple. In practical
-terms, this means that `<a><b>c</b></a>` is equivalent to `<a b="c" />`.
+terms, this means that `<a><b>c</b></a>` is usually equivalent to `<a b="c" />`.
+However, there are some caveats:
+
+	1. In menu.xml, the attributes *id*, *label* and *execute* must be
+	expressed as attributes rather than as separate child elements.
+
+	2. Ordering of attributes can sometimes be significant. For example,
+	when setting fonts via attributes rather than children,
+
+		*<font place="ActiveWindow" name="..." size="..." />*
+
+	will set a font for active window titles, while
+
+		*<font name="..." size="..." place="ActiveWindow" />*
+
+	will set a font as if *place* were unspecified, because *name* and
+	*size* will be processed before *place*.
+
+In general, it is recommended that attributes not be used to collapse more than
+one level of the configuration hierarchy.
 
 The following three are therefore treated the same:
 
@@ -166,7 +205,7 @@ this is for compatibility with Openbox.
 
 ## WINDOW SWITCHER
 
-*<windowSwitcher show="" preview="" outlines="">*
+*<windowSwitcher show="" preview="" outlines="" allWorkspaces="">*
 	*show* [yes|no] Draw the OnScreenDisplay when switching between
 	windows. Default is yes.
 
@@ -175,6 +214,10 @@ this is for compatibility with Openbox.
 
 	*outlines* [yes|no] Draw an outline around the selected window when
 	switching between windows. Default is yes.
+
+	*allWorkspaces* [yes|no] Show windows regardless of what workspace
+	they are on. Default no (that is only windows on the current workspace
+	are shown).
 
 *<windowSwitcher><fields><field content="" width="%">*
 	Define window switcher fields.
@@ -190,6 +233,39 @@ this is for compatibility with Openbox.
 		  the first two nodes of 'org.' strings.
 
 		- *title* Show window title if different to app_id
+
+		- *workspace* Show workspace name
+
+		- *state* Show window state, M/m/F (max/min/full)
+
+		- *type_short* Show view type ("W" or "X")
+
+		- *output* Show output id, if more than one output detected
+
+		- *custom* A printf style config that can replace all the above
+		  fields are:
+			- 'B' - shell type, values [xwayland|xdg-shell]
+			- 'b' - shell type (short form), values [X|W]
+			- 'S' - state of window, values [M|m|F] (3 spaces allocated)
+			        (maximized, minimized, fullscreen)
+			- 's' - state of window (short form), values [M|m|F] (1 space)
+			- 'I' - wm-class/app-id
+			- 'i' - wm-class/app-id trimmed, remove "org." if available
+			- 'W' - workspace name
+			- 'w' - workspace name (if more than 1 ws configured)
+			- 'O' - output name
+			- 'o' - output name (show if more than 1 monitor active)
+			- 'T' - title of window
+			- 't' - title of window (if different than wm-class/app-id)
+		  Recommend using with a monospace font, to keep alignment.
+		- *custom - subset of printf options allowed -- man 3 printf*
+			- random text may be inserted
+			- field length, example "%10" use 10 spaces, even if text uses less
+			- left justify text, example "%-"
+			- right justify text, example "%" instead of "%-"
+			- example, %-10 would left justify and make room for 10 characters
+		- Only one custom format allowed now. Future enhancements may
+		  allow more than one.
 
 	*width* defines the width of the field expressed as a percentage of
 	the overall window switcher width. The "%" character is required.
@@ -247,6 +323,16 @@ extending outward from the snapped edge.
 	SnapToEdge action for that edge. A *range* of 0 disables snapping via
 	interactive moves. Default is 1.
 
+*<snapping><overlay><enabled>* [yes|no]
+	Show an overlay when snapping to a window to an edge. Default is yes.
+
+*<snapping><overlay><delay><inner>*++
+*<snapping><overlay><delay><outer>*
+	Sets the delay to show an overlay when snapping a window to each type of
+	edge. Defaults are 500 ms.
+	*inner* edges are edges with an adjacent output and *outer* edges are
+	edges without an adjacent output.
+
 *<snapping><topMaximize>* [yes|no]
 	If *yes*, an interactive move that snaps a window to the top edge will
 	maximize the window. If *no*, snapping will behave as it does with other
@@ -288,10 +374,10 @@ extending outward from the snapped edge.
 ## WORKSPACES
 
 *<desktops number=""><names><name>*
-	Define workspaces. A workspace covers all outputs. The OSD only shows
-	windows on the current workspace. Workspaces can be switched to with
-	GoToDesktop and windows can be moved with SendToDesktop. See
-	labwc-actions(5) for more information about their arguments.
+	Define workspaces. A workspace covers all outputs. Workspaces can be
+	switched to with GoToDesktop and windows can be moved with
+	SendToDesktop.
+	See labwc-actions(5) for more information about their arguments.
 
 	The number attribute defines the minimum number of workspaces. Default
 	is 1. The number attribute is optional. If the number attribute is
@@ -300,6 +386,9 @@ extending outward from the snapped edge.
 *<desktops><popupTime>*
 	Define the timeout after which to hide the workspace OSD.
 	A setting of 0 disables the OSD. Default is 1000 ms.
+
+*<desktops><prefix>*
+	Set the prefix to use when using "number" above. Default is "Workspace"
 
 ## THEME
 
@@ -312,6 +401,9 @@ extending outward from the snapped edge.
 *<theme><keepBorder>* [yes|no]
 	Even when disabling server side decorations via ToggleDecorations,
 	keep a small border (and resize area) around the window. Default is yes.
+
+*<theme><dropShadows>* [yes|no]
+	Should drop-shadows be rendered behind windows. Default is no.
 
 *<theme><font place="">*
 	The font to use for a specific element of a window, menu or OSD.
@@ -340,7 +432,7 @@ extending outward from the snapped edge.
 
 *<margin top="" bottom="" left="" right="" output="" />*
 	Specify the number of pixels to reserve at the edges of an output
-	(typically a dislay/screen/monitor). New, maximized and tiled windows
+	(typically a display/screen/monitor). New, maximized and tiled windows
 	will not be placed in these areas. The use-case for *<margin>* is as a
 	workaround for clients such as panels that do NOT support the
 	wlr-layer-shell protocol.
@@ -401,7 +493,7 @@ extending outward from the snapped edge.
 	Default is no.
 
 *<keyboard><keybind key=""><action name="">*
-	Keybind action. See labwc-action(5).
+	Keybind action. See labwc-actions(5).
 
 *<keyboard><default />*
 	Load the default keybinds listed below. This is an addition to the
@@ -467,6 +559,7 @@ extending outward from the snapped edge.
 	  through to the application.
 	- Desktop: The desktop background, where no windows are present.
 	- Root: A synonym for Desktop (for compatibility).
+	- All: Anywhere on the screen.
 
 	Supported mouse *buttons* are:
 	- Left
@@ -511,7 +604,7 @@ extending outward from the snapped edge.
 ```
 
 *<touch deviceName="" />*
-	A touch configuration can be bound to a specifc device. If device
+	A touch configuration can be bound to a specific device. If device
 	name is left empty, the touch configuration applies to all touch
 	devices or functions as a fallback. Multiple touch configurations
 	can exist.
@@ -524,7 +617,7 @@ extending outward from the snapped edge.
 ## TABLET
 
 ```
-<tablet mapToOutput="" rotate="0">
+<tablet mapToOutput="" rotate="0" mouseEmulation="no">
   <area top="0.0" left="0.0" width="0.0" height="0.0" />
   <map button="Tip" to="Left" />
   <map button="Stylus" to="Right" />
@@ -540,6 +633,9 @@ extending outward from the snapped edge.
 *<tablet rotate="" />* [0|90|180|270]
 	The tablet orientation can be changed in 90 degree steps. Default is
 	no rotation (0). Rotation will be applied after applying tablet area
+	transformation.
+
+	See also *calibrationMatrix* in libinput section below for advanced
 	transformation.
 
 *<tablet><area top="mm" left="mm" width="mm" height="mm" />*
@@ -561,21 +657,35 @@ extending outward from the snapped edge.
 	additionally setting top to "12.5", the active area is centered
 	vertically on the tablet surface.
 
+*<tablet mouseEmulation="" />* [yes|no]
+	The tablet can be forced to always use mouse emulation. This prevents
+	tablet specific restrictions, e.g. no support for drag-and-drop, but
+	also omits tablet specific features like reporting pen pressure.
+
 *<tablet><map button="" to="" />*
-	Tablet buttons emulate regular mouse buttons. If not specified
-	otherwise, the tip (Tip) is mapped to left mouse click, the first pen
-	button (Stylus)	is mapped to right mouse button click and the second pen
-	button (Stylus2) emulates a middle mouse button click.
+	Pen buttons emulate regular mouse buttons. If not specified
+	otherwise, the first pen button (Stylus) is mapped to right mouse
+	button click and the second pen button (Stylus2) emulates a middle
+	mouse button click. For mouse emulation, the tip (Tip) is mapped to
+	left mouse click.
 
 	Supported map *buttons* are:
-	- Tip
+	- Tip (mouse emulation only)
 	- Stylus
 	- Stylus2
 	- Stylus3
 	- Pad
 	- Pad2..Pad9
 
-	See mouse section above for all supported *to* mouse buttons.
+	The stylus buttons (Stylus, Stylus2 and Stylus3) can be mapped *to*:
+	- Right
+	- Middle
+	- Side
+
+	The tablet pad buttons can be mapped to all available mouse buttons.
+	When using mouse emulation only, the tip and stylus buttons can also be
+	mapped to all available mouse buttons.
+	See mouse section above for all supported mouse buttons.
 
 ## LIBINPUT
 
@@ -594,6 +704,7 @@ extending outward from the snapped edge.
     <disableWhileTyping></disableWhileTyping>
     <clickMethod></clickMethod>
     <sendEventsMode></sendEventsMode>
+    <calibrationMatrix></calibrationMatrix>
   </device>
 </libinput>
 ```
@@ -670,14 +781,14 @@ extending outward from the snapped edge.
 	after as well.
 
 *<libinput><device><clickMethod>* [none|buttonAreas|clickfinger]
-	Configure the method by which physical clicks on a touchpad are mapped to
-	mouse-button events.
+	Configure the method by which physical clicks on a touchpad are mapped
+	to mouse-button events.
 
 	The click methods available are:
 	- *buttonAreas* - The bottom of the touchpad is divided into distinct
-	  regions corresponding to left, middle and right buttons; clicking within
-	  the region will trigger the corresponding event. Clicking the main area
-	  further up produces a left button event.
+	  regions corresponding to left, middle and right buttons; clicking
+	  within the region will trigger the corresponding event. Clicking the
+	  main area further up produces a left button event.
 	- *clickfinger* - Clicking with one, two or three finger(s) will produce
 	  left, right or middle button event without regard to the location of a
 	  click.
@@ -699,6 +810,26 @@ extending outward from the snapped edge.
 
 	By default, this setting is not configured.
 
+*<libinput><device><calibrationMatrix>* [six float values split by space]
+	Apply the 3x3 transformation matrix to absolute device coordinates. This
+	matrix has no effect on relative events.
+
+	Given a 6-element array [a b c d e f], the matrix is applied as
+```
+    [ a  b  c ]   [ x ]
+    [ d  e  f ] * [ y ]
+    [ 0  0  1 ]   [ 1 ]
+
+The most common matrices are:
+    90 deg cw:      180 deg cw:     270 deg cw:     reflect along y axis:
+    [ 0 -1 1]       [ -1  0 1]      [  0 1 0 ]      [ -1 0 1 ]
+    [ 1  0 0]       [  0 -1 1]      [ -1 0 1 ]      [  1 0 0 ]
+    [ 0  0 1]       [  0  0 1]      [  0 0 1 ]      [  0 0 1 ]
+```
+
+	visit https://wayland.freedesktop.org/libinput/doc/latest/absolute-axes.html#calibration-of-absolute-devices
+	for more information.
+
 ## WINDOW RULES
 
 Two types of window rules are supported, actions and properties. They are
@@ -708,7 +839,7 @@ defined as shown below.
 <windowRules>
 
   <!-- Action -->
-  <windowRule identifier="" title="">
+  <windowRule identifier="" title="" type="">
     <action name=""/>
   </windowRule>
 
@@ -720,10 +851,11 @@ defined as shown below.
 
 *Criteria*
 
-*<windowRules><windowRule identifier="" title="" matchOnce="">*
+*<windowRules><windowRule identifier="" title="" sandboxEngine=""
+sandboxAppId="" type="" matchOnce="">*
 	Define a window rule for any window which matches the criteria defined
-	by the attributes *identifier* or *title*. If both are defined, AND
-	logic is used, so both have to match.
+	by the attributes *identifier*, *title*, or *type*. If more than one
+	is defined, AND logic is used, so all have to match.
 	Matching against patterns with '\*' (wildcard) and '?' (joker) is
 	supported. Pattern matching is case-insensitive.
 
@@ -731,6 +863,17 @@ defined as shown below.
 	for XWayland clients.
 
 	*title* is the title of the window.
+
+	*sandboxEngine* is a sandbox engine name from the security context.
+
+	*sandboxAppId* is a sandbox-specific identifier for an application
+	from the security context.
+
+	*type* [desktop|dock|toolbar|menu|utility|splash|dialog|dropdown_menu|
+	popup_menu|tooltip|notification|combo|dnd|normal] relates to
+	NET_WM_WINDOW_TYPE for XWayland clients. Native wayland clients have
+	type "dialog" when they have a parent or a fixed size, or "normal"
+	otherwise.
 
 	*matchOnce* can be true|false. If true, the rule will only apply to the
 	first instance of the window with the specified identifier or title.
@@ -757,13 +900,68 @@ situation.
 	on-screen-display).
 
 *<windowRules><windowRule ignoreFocusRequest="">* [yes|no|default]
-	*ignoreFocusRequest* prevent window to activate itself.
+	*ignoreFocusRequest* prevents window to activate itself.
+
+*<windowRules><windowRule ignoreConfigureRequest="">* [yes|no|default]
+	*ignoreConfigureRequest* prevents a X11 window to position and size
+	itself.
 
 *<windowRules><windowRule fixedPosition="">* [yes|no|default]
 	*fixedPosition* disallows interactive move/resize and prevents
 	re-positioning in response to changes in reserved output space, which
 	can be caused by *<margin>* settings or exclusive layer-shell clients
 	such as panels.
+
+## MENU
+
+```
+<menu>
+  <ignoreButtonReleasePeriod>250</ignoreButtonReleasePeriod>
+</menu>
+```
+
+*<menu><ignoreButtonReleasePeriod>*
+	How long (in milliseconds) the initial button release event is ignored
+	for. The reason for this logic and behaviour is to avoid a fast
+	press-move-release sequence indended to just open the menu resulting in
+	the closure of the menu or the selection of (typically the first) menu
+	item. This behaviour only affects the first button-release. It is not
+	anticipated that most users will want to change this, but the config
+	option has been exposed for unusual use-cases. It is equivalent to
+	Openbox's `<hideDelay>`. Default is 250 ms.
+
+## MAGNIFIER
+
+```
+<magnifier>
+  <width>400</width>
+  <height>400</height>
+  <initScale>2</initScale>
+  <increment>0.2</increment>
+  <useFilter>true</useFilter>
+</magnifier>
+```
+
+*<magnifier><width>*
+	Width of magnifier window in pixels. Default is 400.
+	Set to -1 to use fullscreen magnifier.
+
+*<magnifier><height>*
+	Height of magnifier window in pixels. Default is 400.
+	Set to -1 to use fullscreen magnifier.
+
+*<magnifier><initScale>*
+	Initial number of times by which magnified image is scaled. Value
+	is the default at boot; can be modified at run-time in a keyboard
+	or mouse binding by calling 'ZoomIn' or 'ZoomOut'. Default is x2.0.
+
+*<magnifier><increment>*
+	Step by which magnification changes on each call to 'ZoomIn' or
+	'ZoomOut'. Default is 0.2.
+
+*<magnifier><useFilter>* [yes|no|default]
+	Whether to apply a bilinear filter to the magnified image, or
+	just to use nearest-neighbour. Default is true - bilinear filtered.
 
 ## ENVIRONMENT VARIABLES
 

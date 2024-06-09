@@ -9,7 +9,8 @@ The format is based on [Keep a Changelog]
 
 | Date       | All Changes   | wlroots version | lines-of-code |
 |------------|---------------|-----------------|---------------|
-| 2024-01-23 | [unreleased]  | 0.17.1          |               |
+| 2024-05-10 | [0.7.2]       | 0.17.3          | 21368         |
+| 2024-03-01 | [0.7.1]       | 0.17.1          | 18624         |
 | 2023-12-22 | [0.7.0]       | 0.17.1          | 16576         |
 | 2023-11-25 | [0.6.6]       | 0.16.2          | 15796         |
 | 2023-09-23 | [0.6.5]       | 0.16.2          | 14809         |
@@ -27,11 +28,302 @@ The format is based on [Keep a Changelog]
 | 2021-04-15 | [0.2.0]       | 0.13.0          | 5011          |
 | 2021-03-05 | [0.1.0]       | 0.12.0          | 4627          |
 
+## [0.7.2]
 
-## [unreleased]
+This release is shaping up to be the second in a row that is larger than
+usual in terms of both fixes and new features. Significant additions
+include input-methods, pipemenus, snap-to-edge overlays and optionally
+drop-shadows.
+
+As usual, most of the commits are by the core devs: @ahesford, @Consolatis,
+@jlindgren90, @johanmalm and @tokyo4j, but we also have many great
+contributions from others as noted in the log.
 
 ### Added
 
+- Add `<menu><ignoreButtonReleasePeriod>` to prevent clicks with small movements
+  from inadvertantly closing a menu or selecting a menu item. This is the
+  equivalent of `<menu><hideDelay>` on Openbox. #1760
+- Support drop-shadows (disabled by default) for windows using server-side
+  decorations. Written-by: @cillian64
+
+```xml
+<theme>
+  <dropShadows>yes|no</dropShadows>
+</theme>
+```
+
+```
+window.active.shadow.size: 60
+window.inactive.shadow.size: 40
+window.active.shadow.color: #00000060
+window.inactive.shadow.color: #00000040
+```
+
+- Add window-rule `ignoreConfigureRequest` to ignore X11 client-side
+  configure requests (positioning and resizing). #1446
+- Support window-rules based on window type: `<windowRule type="">`, where
+  type can be for example `NET_WM_WINDOW_TYPE_DESKTOP` for an XWayland
+  window. Written-by: @xi @txgk
+- Add `none` branch to the `ForEach` action. Written-by: @nicolas3121
+  #1298
+
+```xml
+<action name="ForEach">
+  <query identifier="foo"/>
+  <then>
+    <!-- carry out some action on match -->
+  </then>
+  <none>
+    <!-- carry out some action if there were no matches at all -->
+  </none>
+</action>
+```
+
+- Add -S|--session `<command>` option to start `<command>` on startup and
+  to terminate the compositor when <command> exits. This is useful for
+  session management as it allows the session client (for example
+  `lxqt-session`) to terminate labwc when exiting itself.
+- In theme setting color definitions, support inline alpha encoding like
+  `#aabbccff`
+- Add window-switcher custom field inspired by printf formatting. #1670
+  Written-by: @droc12345 and @Consolatis
+
+```xml
+<windowSwitcher>
+  <fields>
+    <field content="custom" format="foobar %b %3s %-10o %-20W %-10i%t" width="100%" />
+  </fields>
+</windowSwitcher>
+```
+
+- Support defining window-switcher width as a percentage of output
+  (display) width. Written-by: @droc12345
+
+```
+osd.window-switcher.width: 75%
+```
+
+- Support Openbox compatible pipe-menus. See labwc-menu(5) for usage.
+- Add snap-to-edge overlay. Written-by: @tokyo4j. PR #1652 #1702
+  This includes the following new config and theme settings:
+
+```xml
+<snapping>
+  <overlay>
+    <enabled>yes|no</enabled>
+    <delay inner="500" outer="500"/>
+  </overlay>
+</snapping>
+```
+
+```
+snapping.overlay.[region|edge].bg.enabled: yes|no
+snapping.overlay.[region|edge].border.enabled: yes|no
+snapping.overlay.[region|edge].bg.color: #8080b380
+snapping.overlay.[region|edge].border.width: 1
+snapping.overlay.[region|edge].border.color: #ffffff,#000000,#ffffff
+```
+
+- Add theme settings listed below for window-switcher preview border.
+  Written-by: @tokyo4j
+
+```
+osd.window-switcher.preview.border.width: 2
+osd.window-switcher.preview.border.color: #ffffff,#00a2ff,#ffffff
+```
+
+- Support libinput config option for calibration matrices.
+  `<libinput><device><calibrationMatrix>`. Written-by: @SnowNF
+- Add new window-switcher field content types `workspace`, `state`,
+  `type_short` and `output`. Written-by: @droc12345 PR #1623
+
+```xml
+<windowSwitcher allWorkspaces="yes">
+  <fields>
+    <field content="workspace" width="5%" />
+    <field content="state" width="3%" />
+    <field content="type_short" width="3%" />
+    <field content="output" width="9%" />
+    <field content="identifier" width="30%" />
+    <field content="title" width="50%" />
+  </fields>
+</windowSwitcher>
+```
+
+- Support input methods (or input method editors, commonly abbreviated
+  IMEs) like Fcitx5, using protocols text-input-v3 and input-method-v2.
+  This includes IME popups. Written-by: @tokyo4j
+- Add `atCursor` attribute to action `ShowMenu` so that a window's
+  "client-menu" could optionally be launched at the pointer using a
+  keybind as follows:
+
+```xml
+<action name="ShowMenu" menu="value" atCursor="yes" />
+```
+
+- Support workspace-prefix (`<desktops><prefix>`) for workspace-switcher
+  onscreen display when naming workspaces by digits, for example 1, 2, 3
+  Written-by: @droc12345
+- Process all `*.env` files in an `environment.d` directory alongside and
+  in the same way as each potential `environment` file.
+- Allow empty variables in `environment` files. In other words, respond to
+  variable declarations of the form "VARIABLE=", with no following value,
+  by setting the corresponding environment variable as an empty string.
+- Add optional headless fallback output that is automatically created when
+  no other output exists.  Enable this by setting the environment variable
+  `LABWC_FALLBACK_OUTPUT` to the desired output name.  The feature
+  benefits applications like wayvnc the most by ensuring that there is
+  always an output available to connect to. #1618
+  Co-Authored-By: Simon Long <simon@raspberrypi.com>
+- Optionally show windows on all workspaces in window-switcher.
+
+```xml
+<windowSwitcher allWorkspaces="yes">
+```
+
+- Handle touch on headerbar using cursor emulate events. Issue #1550
+  Written-by: @spl237
+- Updated dbus activation environment with more environment variables
+  (`XCURSOR_SIZE`, `XCURSOR_THEME`, `XDG_SESSION_TYPE`, `LABWC_PID`)
+  Written-by: @winerysearch  Issue #694
+- Run `shutdown` script on exit (equivalent to `autostart` on startup)
+- Add `wrap` argument to action `MoveToOutput`. Wrap is disabled by
+  default to keep the user interface consistent. Example usage:
+
+```xml
+<action name="MoveToOutput" direction="right" wrap="yes" />
+```
+
+### Fixed
+
+- Prevent Chromium from crashing when started after a virtual keyboard is
+  destroyed. #1789
+- Fix top-layer not showing when there is a minimized full-screen window
+  Written-by: @fberg
+- Prevent the following whilst window-switcher cycling (#1640):
+  - Cursor actions on the window previews
+  - Request-xdg-activation
+  - Foreign toplevel request-activate
+  - XWayland request-activate
+- Prevent shaded XWayland windows from getting cursor events. #1753
+- Fix menu-parser use-after-free bug. #1780
+- Update top layer visibility on map to fix bug with Steam's Big Picture Mode
+  window which requests fullscreen before mapping. #1763
+- Do not update server-side-decoration if window is too small. #1762
+- Fix crash on `Kill` action with XWayland windows. #1739
+- Update workspaces on `--reconfigure`. Written-by: @tokyo4j
+- Notify idle manager when emulating cursor movement.
+- Fix GrowToEdge/ShrinkToEdge action bug caused by clients ignoring the
+  requested size, for example a terminal honouring size-hints.
+- Fix `assert()` on VT switch. Issue #1667
+- Ensure titlebar has consistent look when using transparency. #1684
+- Fix dnd bug where dnd does not finish properly on cursor-button-release
+  if there is no surface under the cursor such as on the desktop when no
+  background client is running. #1673
+- Send cursor-button release event to CSD client before finishing window
+  dragging to avoid a bug whereby the release event is incorrectly sent to
+  a layer-shell client at the end of a drag.
+- Validate double-click against SSD part type because clicks on
+  different parts of a client in quick succession should not be
+  interpreted as a double click. #1657
+- Fix bug that region overlay is not shown when a modifier key is re-
+  pressed.
+- Fix workspace-switcher on-screen-display positioning of text using
+  right-to-left (RTL) locales. Written-by: @micko01 Issue #1633
+- Unconstrain xdg-shell popups to usable area (rather than full output) so
+  that popups do not cover layer-shell clients such as panels.
+  Written-by: @tokyo4j
+- Exclude unfocusable XWayland windows (for example notifications and
+  floating toolbars) from being processed by wlr-foreign-toplevel protocol
+  as these windows should not be shown in taskbars/docks/etc.
+- Render text buffers with opaque backgrounds because subpixel text
+  rendering over a transparent background does not work properly with
+  cairo/pango. PR #1631 issue #1684
+- Fallback on layout 'us' if a keymap cannot be created for the provided
+  `XKB_DEFAULT_LAYOUT`. If keymap still cannot be created, exit with a
+  helpful message instead of a segv crash.
+- Reload cursor theme and size on reconfigure. This gives instant feedback, but
+  only works for server side cursors or clients using the cursor-shape protocol.
+  Written-by: @spl237 and @Consolatis. #1587 #1619
+- Fix a number of surface-focus related short-comings:
+  - Handle cursor-button-press on layer-shell subsurfaces and fix bug in
+    `get_cursor_context()` which resulted in layer-surfaces not being
+    detected correctly. PR #1594
+  - Overhaul the logic for giving keyboard focus to layer-shell clients.
+    PR #1599 Issue #1653
+- Fix move/resize bug manifesting itself on touchpad taps with
+  `<tapAndDrag>` disabled because libinput sends button press & release
+  signals so quickly that `interactive_finish()` is never called.
+  Written-by: @tokyo4j
+- Include always-on-top windows in window-switcher.
+- Make resize flicker free again when running labwc nested (it was a
+  regression caused by wlroots 0.17).
+- Clean up dbus and systemd activation environments on exit
+- Fix `view_get_adjacent_output()` bug resulting in often returning an
+  incorrect output when using more than two outputs. Issue #1582
+
+### Changed
+
+- Support press-move-release when interacting with the labwc root-menu. #1750
+- In theme settings, mark color definitions in the format `#rrggbb aaa` as
+  deprecated (still supported, but will removed in some future release) in
+  favor of the more commonly used `#rrggbbaa`.
+- If your `rc.xml` contains a keybind to show menu "client-menu", it will
+  be launched at pointer rather than the top-left part of the window. To
+  keep the old behaviour, redefine it as follows:
+
+```xml
+<keybind key="A-Space">
+  <action name="ShowMenu" menu="client-menu" atCursor="No"/>
+</keybind>
+```
+
+- Change action `MoveToOutput` argument 'name' to 'output' (because 'name'
+  is already used by the action itself).  Issue #1589
+
+```xml
+<action name="MoveToOutput" output="HDMI-A-1"/>
+```
+
+- Do not deactivate window when giving keyboard focus to a non-view
+  surface such as a popup or layer-shell surface.  This matches Openbox
+  behavior.
+- Treat Globally Active XWayland windows according to type to fix focus
+  issues with IntelliJ IDEA and JDownloader 2. Issues: #1139 #1341
+  Also revert f6e3527 which allowed re-focus between Globally Active
+  XWayland windows of the same PID.
+- Only update dbus and systemd activation environments when running on
+  the DRM backend or by explicit request using environment variable
+  `LABWC_UPDATE_ACTIVATION_ENV`.
+
+## [0.7.1]
+
+### Added
+
+- Support libinput option sendEventsMode to allow enabling/disabling devices.
+  Co-Authored-By: @Sachin-Bhat
+
+```xml
+<libinput>
+  <device>
+    <sendEventsMode>yes|no|disabledOnExternalMouse</sendEventsMode>
+  </device>
+</libinput>
+```
+
+- Add click method libinput option. Written-by: @datMaffin
+
+```xml
+<libinput>
+  <device>
+    <clickMethod>none|buttonAreas|clickfinger</clickMethod>
+  </device>
+</libinput>
+```
+
+- Add `data/labwc.svg` & `data/labwc-symbolic.svg`, and specify icon name
+  in labwc.desktop to enable Display Managers to show an icons for labwc.
 - Expose output configuration test to clients. For example, this enables
   `wlr-randr --dryrun`
 - Add window-edge resistance for interactive moves/resizes and support negative
@@ -90,6 +382,7 @@ The format is based on [Keep a Changelog]
 - Add config option `<placement><policy>` with supported values `center`,
   `cursor` and `automatic`. The latter minimizes overlap with other windows
   already on screen and is similar to Openbox's smart window placement.
+  The placement policies honour `<core><gap>`.
   Written-by: @ahesford #1312
 
 ```xml
@@ -100,6 +393,13 @@ The format is based on [Keep a Changelog]
 
 ### Fixed
 
+- Delay popup-unconstrain until after first commit in response to a changed
+  wlroots 0.17 interface and to get rid of the error message below. Issue #1372
+
+    [types/xdg_shell/wlr_xdg_surface.c:169] A configure is scheduled for an uninitialized xdg_surface
+
+- Notify clients about configuration errors when changing output settings.
+  Issue #1528.
 - Fix output configuration bug causing compositor crash when refresh rate is
   zero. Issue #1458
 - Fix disappearing cursor bug on view destruction. Issue #1393
@@ -124,6 +424,8 @@ The format is based on [Keep a Changelog]
 
 ### Changed
 
+- Make `MoveToCursor` honour `<core><gap>`. Issue #1494
+- Add `Roll Up/Down` client-menu entry for `ToggleShade`
 - When a Wayland-native window is snapped to a screen edges or user-defined
   region, labwc will notify the application that it is "tiled", allowing the
   application to better adapt its rendering to constrained layouts. Windows
@@ -144,7 +446,7 @@ The format is based on [Keep a Changelog]
   user-defined region), the snapped state is now discarded as soon as the
   dragging begins. This means that dragging from a snapped position to a
   maximized state (with the `topMaximize` option enabled) and then
-  un-maxmimizing the window will restore the window to its size and position
+  un-maximizing the window will restore the window to its size and position
   *before* it was snapped. In previous releases, un-maximizing would restore
   the window to its snapped state. To preserve the snapped state of a window
   when maximized, use the Maximize window button or the `ToggleMaximize`
@@ -159,7 +461,7 @@ The format is based on [Keep a Changelog]
 </resistance>
 ```
 
-- Run menu actions on button release intead of press.
+- Run menu actions on button release instead of press.
 - Constrain window size to that of usable area when an application is started.
   Issue #1399
 - Support showing the full `app_id` in the window switcher. Users with a custom
@@ -198,7 +500,7 @@ Should bug fixes be required against `0.6.6` (built with wlroots `0.16`), a
   for it in the client-menu under the Workspaces submenu. Written-by: @bnason
 - Account for space taken up by XWayland clients with `_NET_WM_STRUT_PARTIAL`
   property in the `usable_area` calculation. This increases inter-operability
-  with X11 desktop componenets.
+  with X11 desktop components.
 - Set XWayland's `_NET_WORKAREA` property based on usable area. XWayland
   clients use the `_NET_WORKAREA` root window property to determine how much of
   the screen is not covered by panels/docks. The property is used for example
@@ -264,7 +566,7 @@ relating to surface focus and keyboard issues, amongst others.
 
 - Do not reset XWayland window SSD on unminimize
 - Keep XWayland stacking order in sync when switching workspaces
-- Update top-layer visiblity on workspace-switch in order to show
+- Update top-layer visibility on workspace-switch in order to show
   top-layer layer-shell clients correctly when there is a window in
   fullscreen mode on another workspace. Issues: #1040 #1158
 - Make interactive window snapping with mouse more intuitive in
@@ -400,7 +702,7 @@ relating to surface focus and keyboard issues, amongst others.
 - xwayland: fix client request-unmap bug relating to foreign-toplevel handle
 - xwayland: fix race condition resulting in map view without surface
 - Limit SSD corner radius to the height of the titlebar
-- Fix rounded-corner bug producing weird artefacts when very large border
+- Fix rounded-corner bug producing weird artifacts when very large border
   thickness is used. Fixes #988
 - Ensure `string_prop()` handlers deal with destroying views. Fixes #1082
 - Fix SSD thickness calculation bug relating to titlebar. Fixes #1083
@@ -430,7 +732,7 @@ relating to surface focus and keyboard issues, amongst others.
 
 - Add support for `ext_idle_notify` protocol.
 - Window-switcher: #879 #969
-  - Set item-height based on font-heigth
+  - Set item-height based on font-height
   - Add theme option:
     - osd.window-switcher.width
     - osd.window-switcher.padding
@@ -641,7 +943,7 @@ particular thanks going to @Consolatis, @jlindgren90, @bi4k8, @Flrian and
 - Prevent re-focus for always-on-top views when switching workspaces.
   Written-by: @Consolatis
 - Make sure a default libinput category always exists to avoid devices not
-  being configured is some insances. Written-by: @jlindgren90
+  being configured is some instances. Written-by: @jlindgren90
 - Update cursor if it is within the OSD area when OSD appears/disappears.
   Written-by: @bi4k8
 - Provide generic parsing of XML action arguments to enable the use of the
@@ -708,7 +1010,7 @@ reported, tested and fixed issues. Particular mentions go to @bi4k8,
   of outlines. Written-by: @Flrian
 - Render submenu arrows
 - Allow highest level menu definitions - typically used for root-menu and
-  client-menu - to be defined without label attritube, for example like this:
+  client-menu - to be defined without label attribute, for example like this:
   `<openbox_menu><menu id="root-menu">...</menu></openbox>`. Issue #472
 - Allow xdg-desktop-portal-wlr to work out of the box by initializing dbus
   and systemd activation environment. This enables for example OBS Studio
@@ -751,7 +1053,7 @@ reported, tested and fixed issues. Particular mentions go to @bi4k8,
 - Enable tap be default on non-touch devices (which some laptop trackpads
   apparently are)
 - Handle missing cursor theme (issue #246). Written-by: @Consolatis
-- Fix various surface syncronization, stacking, positioning and focus
+- Fix various surface synchronization, stacking, positioning and focus
   issues, including those related to both xwayland, scroll/drag events
   and also #526 #483
 - On first map, do not center xwayland views with explicitly specified
@@ -773,7 +1075,7 @@ reported, tested and fixed issues. Particular mentions go to @bi4k8,
   focused view.
 - Gracefully handle dying client during interactive move.
   Written-by: @Consolatis
-- Dynamically adjust server-side-deccoration invisible resize areas based
+- Dynamically adjust server-side-decoration invisible resize areas based
   on `usable_area` to ensure that cursor events are sent to clients such as
   panels in preference to grabbing window edges. Fixes #265.
   Written-by: @Consolatis
@@ -795,7 +1097,7 @@ reported, tested and fixed issues. Particular mentions go to @bi4k8,
   unmaximized geometry is known when started in maximized mode.
   Fixes issue #305. Reported-by: @01micko
 - Support `<menu><item><action name="Execute"><execute>`
-  `<exectue>` is a deprecated name for `<command>`, but is supported for
+  `<execute>` is a deprecated name for `<command>`, but is supported for
   backward compatibility with old menu-generators.
 - Keep xwayland-shell SSD state on unmap/map cycle.
   Written-by: @Consolatis
@@ -842,7 +1144,7 @@ reported, tested and fixed issues. Particular mentions go to @bi4k8,
 - Call foreign-toplevel-destroy when unmapping xwayland surfaces because
   some xwayland clients leave unmapped child views around. Although
   `handle_destroy()` is not called for these, we have to call
-  foreign-toplevel-destroy to avoid clients such as panels incorrecly
+  foreign-toplevel-destroy to avoid clients such as panels incorrectly
   showing them.
 - Handle xwayland `set_override_redirect` events to fix weird behaviour
   with gitk menus and rofi.
@@ -850,7 +1152,7 @@ reported, tested and fixed issues. Particular mentions go to @bi4k8,
   Fixes #352 relating to JetBrains and Intellij focus issues
   Written-by: Jelle De Loecker
 - Do not segfault on missing drag icon. Written-by: @Consolatis
-- Fix windows irratically sticking to edges during move/resize.
+- Fix windows erratically sticking to edges during move/resize.
   Fixes issues #331 and #309
 
 ## [0.5.2] - 2022-05-17
@@ -1043,7 +1345,9 @@ Compile with wlroots 0.12.0 and wayland-server >=1.16
   ShowMenu
 
 [Keep a Changelog]: https://keepachangelog.com/en/1.0.0/
-[unreleased]: https://github.com/labwc/labwc/compare/0.7.0...HEAD
+[unreleased]: https://github.com/labwc/labwc/compare/0.7.2...HEAD
+[0.7.2]: https://github.com/labwc/labwc/compare/0.7.1...0.7.2
+[0.7.1]: https://github.com/labwc/labwc/compare/0.7.0...0.7.1
 [0.7.0]: https://github.com/labwc/labwc/compare/0.6.6...0.7.0
 [0.6.6]: https://github.com/labwc/labwc/compare/0.6.5...0.6.6
 [0.6.5]: https://github.com/labwc/labwc/compare/0.6.4...0.6.5

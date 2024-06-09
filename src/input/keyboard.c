@@ -1,14 +1,18 @@
 // SPDX-License-Identifier: GPL-2.0-only
+#define _POSIX_C_SOURCE 200809L
 #include <assert.h>
+#include <stdlib.h>
 #include <wlr/backend/multi.h>
 #include <wlr/backend/session.h>
 #include <wlr/interfaces/wlr_keyboard.h>
 #include "action.h"
 #include "idle.h"
+#include "input/ime.h"
 #include "input/keyboard.h"
 #include "input/key-state.h"
 #include "labwc.h"
 #include "menu/menu.h"
+#include "osd.h"
 #include "regions.h"
 #include "view.h"
 #include "workspaces.h"
@@ -56,6 +60,7 @@ keyboard_any_modifiers_pressed(struct wlr_keyboard *keyboard)
 static void
 end_cycling(struct server *server)
 {
+	osd_preview_restore(server);
 	if (server->osd_state.cycle_view) {
 		desktop_focus_view(server->osd_state.cycle_view,
 			/*raise*/ true);
@@ -77,11 +82,13 @@ keyboard_modifiers_notify(struct wl_listener *listener, void *data)
 	if (server->input_mode == LAB_INPUT_STATE_MOVE) {
 		/* Any change to the modifier state re-enable region snap */
 		seat->region_prevent_snap = false;
+		/* Pressing/releasing modifier key may show/hide region overlay */
+		overlay_update(seat);
 	}
 
-	if (server->osd_state.cycle_view || server->grabbed_view
+	if (server->osd_state.cycle_view
 			|| seat->workspace_osd_shown_by_modifier) {
-		if (!keyboard_any_modifiers_pressed(wlr_keyboard))  {
+		if (!keyboard_any_modifiers_pressed(wlr_keyboard)) {
 			if (server->osd_state.cycle_view) {
 				if (key_state_nr_bound_keys()) {
 					should_cancel_cycling_on_next_key_release = true;
@@ -92,12 +99,13 @@ keyboard_modifiers_notify(struct wl_listener *listener, void *data)
 			if (seat->workspace_osd_shown_by_modifier) {
 				workspaces_osd_hide(seat);
 			}
-			if (server->grabbed_view) {
-				regions_hide_overlay(seat);
-			}
 		}
 	}
-	wlr_seat_keyboard_notify_modifiers(seat->seat, &wlr_keyboard->modifiers);
+
+	if (!input_method_keyboard_grab_forward_modifiers(keyboard)) {
+		wlr_seat_keyboard_notify_modifiers(seat->seat,
+			&wlr_keyboard->modifiers);
+	}
 }
 
 static struct keybind *
@@ -416,7 +424,7 @@ handle_compositor_keybindings(struct keyboard *keyboard,
 	if (seat->active_client_while_inhibited) {
 		return false;
 	}
-	if (seat->server->session_lock) {
+	if (seat->server->session_lock_manager->locked) {
 		return false;
 	}
 
@@ -523,7 +531,7 @@ keyboard_key_notify(struct wl_listener *listener, void *data)
 		if (event->state == WL_KEYBOARD_KEY_STATE_PRESSED) {
 			start_keybind_repeat(seat->server, keyboard, event);
 		}
-	} else {
+	} else if (!input_method_keyboard_grab_forward_key(keyboard, event)) {
 		wlr_seat_set_keyboard(wlr_seat, keyboard->wlr_keyboard);
 		wlr_seat_keyboard_notify_key(wlr_seat, event->time_msec,
 			event->keycode, event->state);
@@ -623,6 +631,8 @@ reset_window_keyboard_layout_groups(struct server *server)
 static void
 set_layout(struct server *server, struct wlr_keyboard *kb)
 {
+	static bool fallback_mode;
+
 	struct xkb_rule_names rules = { 0 };
 	struct xkb_context *context = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
 	struct xkb_keymap *keymap = xkb_map_new_from_names(context, &rules,
@@ -634,7 +644,14 @@ set_layout(struct server *server, struct wlr_keyboard *kb)
 		}
 		xkb_keymap_unref(keymap);
 	} else {
-		wlr_log(WLR_ERROR, "Failed to create xkb keymap");
+		wlr_log(WLR_ERROR, "failed to create xkb keymap for layout '%s'",
+			getenv("XKB_DEFAULT_LAYOUT"));
+		if (!fallback_mode) {
+			wlr_log(WLR_ERROR, "entering fallback mode with layout 'us'");
+			fallback_mode = true;
+			setenv("XKB_DEFAULT_LAYOUT", "us", 1);
+			set_layout(server, kb);
+		}
 	}
 	xkb_context_unref(context);
 }

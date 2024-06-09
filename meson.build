@@ -1,7 +1,7 @@
 project(
   'labwc',
   'c',
-  version: '0.7.0',
+  version: '0.7.2',
   license: 'GPL-2.0-only',
   meson_version: '>=0.59.0',
   default_options: [
@@ -86,6 +86,10 @@ else
   have_rsvg = svg.found()
 endif
 conf_data.set10('HAVE_RSVG', have_rsvg)
+
+if get_option('static_analyzer').enabled()
+  add_project_arguments(['-fanalyzer'], language: 'c')
+endif
 
 msgfmt = find_program('msgfmt', required: get_option('nls'))
 if msgfmt.found()

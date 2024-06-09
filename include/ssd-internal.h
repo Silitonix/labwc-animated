@@ -76,6 +76,12 @@ struct ssd {
 		struct ssd_sub_tree inactive;
 	} border;
 
+	struct {
+		struct wlr_scene_tree *tree;
+		struct ssd_sub_tree active;
+		struct ssd_sub_tree inactive;
+	} shadow;
+
 	/*
 	 * Space between the extremities of the view's wlr_surface
 	 * and the max extents of the server-side decorations.
@@ -123,9 +129,9 @@ struct ssd_part *add_scene_button(
 	struct wlr_scene_tree *parent, float *bg_color,
 	struct wlr_buffer *icon_buffer, struct wlr_buffer *hover_buffer,
 	int x, struct view *view);
-void
-add_toggled_icon(struct wl_list *part_list, enum ssd_part_type type,
-		struct wlr_buffer *icon_buffer, struct wlr_buffer *hover_buffer);
+void add_toggled_icon(struct ssd_button *button, struct wl_list *part_list,
+	enum ssd_part_type type, struct wlr_buffer *icon_buffer,
+	struct wlr_buffer *hover_buffer);
 struct ssd_part *add_scene_button_corner(
 	struct wl_list *part_list, enum ssd_part_type type,
 	enum ssd_part_type corner_type, struct wlr_scene_tree *parent,
@@ -149,5 +155,9 @@ void ssd_border_destroy(struct ssd *ssd);
 void ssd_extents_create(struct ssd *ssd);
 void ssd_extents_update(struct ssd *ssd);
 void ssd_extents_destroy(struct ssd *ssd);
+
+void ssd_shadow_create(struct ssd *ssd);
+void ssd_shadow_update(struct ssd *ssd);
+void ssd_shadow_destroy(struct ssd *ssd);
 
 #endif /* LABWC_SSD_INTERNAL_H */

@@ -14,38 +14,12 @@
 #include "common/scene-helpers.h"
 #include "config/rcxml.h"
 #include "labwc.h"
-#include "theme.h"
 #include "node.h"
+#include "osd.h"
+#include "theme.h"
 #include "view.h"
 #include "window-rules.h"
 #include "workspaces.h"
-
-static const char *
-get_formatted_app_id(struct view *view)
-{
-	char *s = (char *)view_get_string_prop(view, "app_id");
-	if (!s) {
-		return NULL;
-	}
-	return s;
-}
-
-static const char *
-get_trimmed_app_id(char *s)
-{
-	if (!s) {
-		return NULL;
-	}
-	/* remove the first two nodes of 'org.' strings */
-	if (!strncmp(s, "org.", 4)) {
-		char *p = s + 4;
-		p = strchr(p, '.');
-		if (p) {
-			return ++p;
-		}
-	}
-	return s;
-}
 
 static void
 destroy_osd_nodes(struct output *output)
@@ -64,11 +38,11 @@ osd_update_preview_outlines(struct view *view)
 	struct server *server = view->server;
 	struct multi_rect *rect = view->server->osd_state.preview_outline;
 	if (!rect) {
-		int line_width = server->theme->osd_border_width;
+		int line_width = server->theme->osd_window_switcher_preview_border_width;
 		float *colors[] = {
-			server->theme->osd_bg_color,
-			server->theme->osd_label_text_color,
-			server->theme->osd_bg_color
+			server->theme->osd_window_switcher_preview_border_color[0],
+			server->theme->osd_window_switcher_preview_border_color[1],
+			server->theme->osd_window_switcher_preview_border_color[2],
 		};
 		rect = multi_rect_create(&server->scene->tree, colors, line_width);
 		wlr_scene_node_place_above(&rect->tree->node, &server->menu_tree->node);
@@ -163,6 +137,9 @@ osd_preview_restore(struct server *server)
 {
 	struct osd_state *osd_state = &server->osd_state;
 	if (osd_state->preview_node) {
+		wlr_scene_node_reparent(osd_state->preview_node,
+			osd_state->preview_parent);
+
 		if (osd_state->preview_anchor) {
 			wlr_scene_node_place_above(osd_state->preview_node,
 				osd_state->preview_anchor);
@@ -176,6 +153,7 @@ osd_preview_restore(struct server *server)
 			wlr_scene_node_set_enabled(osd_state->preview_node, false);
 		}
 		osd_state->preview_node = NULL;
+		osd_state->preview_parent = NULL;
 		osd_state->preview_anchor = NULL;
 	}
 }
@@ -190,8 +168,11 @@ preview_cycled_view(struct view *view)
 	/* Move previous selected node back to its original place */
 	osd_preview_restore(view->server);
 
-	/* Remember the sibling right before the selected node */
+	/* Store some pointers so we can reset the preview later on */
 	osd_state->preview_node = &view->scene_tree->node;
+	osd_state->preview_parent = view->scene_tree->node.parent;
+
+	/* Remember the sibling right before the selected node */
 	osd_state->preview_anchor = lab_wlr_scene_get_prev_node(
 		osd_state->preview_node);
 	while (osd_state->preview_anchor && !osd_state->preview_anchor->data) {
@@ -206,57 +187,22 @@ preview_cycled_view(struct view *view)
 		wlr_scene_node_set_enabled(osd_state->preview_node, true);
 	}
 
+	/*
+	 * FIXME: This abuses an implementation detail of the always-on-top tree.
+	 *        Create a permanent server->osd_preview_tree instead that can
+	 *        also be used as parent for the preview outlines.
+	 */
+	wlr_scene_node_reparent(osd_state->preview_node,
+		view->server->view_tree_always_on_top);
+
 	/* Finally raise selected node to the top */
 	wlr_scene_node_raise_to_top(osd_state->preview_node);
 }
 
-static const char *
-get_type(struct view *view)
-{
-	switch (view->type) {
-	case LAB_XDG_SHELL_VIEW:
-		return "[xdg-shell]";
-#if HAVE_XWAYLAND
-	case LAB_XWAYLAND_VIEW:
-		return "[xwayland]";
-#endif
-	}
-	return "";
-}
-
-static const char *
-get_app_id(struct view *view)
-{
-	switch (view->type) {
-	case LAB_XDG_SHELL_VIEW:
-		return get_formatted_app_id(view);
-#if HAVE_XWAYLAND
-	case LAB_XWAYLAND_VIEW:
-		return view_get_string_prop(view, "class");
-#endif
-	}
-	return "";
-}
-
-static const char *
-get_title_if_different(struct view *view)
-{
-	/*
-	 * XWayland clients return WM_CLASS for 'app_id' so we don't need a
-	 * special case for that here.
-	 */
-	const char *identifier = view_get_string_prop(view, "app_id");
-	const char *title = view_get_string_prop(view, "title");
-	if (!identifier) {
-		return title;
-	}
-	return (!title || !strcmp(identifier, title)) ? NULL : title;
-}
-
 static void
 render_osd(struct server *server, cairo_t *cairo, int w, int h,
-		struct wl_list *node_list, bool show_workspace,
-		const char *workspace_name, struct wl_array *views)
+		bool show_workspace, const char *workspace_name,
+		struct wl_array *views)
 {
 	struct view *cycle_view = server->osd_state.cycle_view;
 	struct theme *theme = server->theme;
@@ -292,7 +238,7 @@ render_osd(struct server *server, cairo_t *cairo, int w, int h,
 	if (show_workspace) {
 		/* Center workspace indicator on the x axis */
 		int x = font_width(&rc.font_osd, workspace_name);
-		x = (theme->osd_window_switcher_width - x) / 2;
+		x = (w - x) / 2;
 		cairo_move_to(cairo, x, y + theme->osd_window_switcher_item_active_border_width);
 		PangoWeight weight = pango_font_description_get_weight(desc);
 		pango_font_description_set_weight(desc, PANGO_WEIGHT_BOLD);
@@ -305,8 +251,7 @@ render_osd(struct server *server, cairo_t *cairo, int w, int h,
 	}
 	pango_font_description_free(desc);
 
-	struct buf buf;
-	buf_init(&buf);
+	struct buf buf = BUF_INIT;
 
 	/* This is the width of the area available for text fields */
 	int available_width = w - 2 * theme->osd_border_width
@@ -340,35 +285,18 @@ render_osd(struct server *server, cairo_t *cairo, int w, int h,
 		int nr_fields = wl_list_length(&rc.window_switcher.fields);
 		struct window_switcher_field *field;
 		wl_list_for_each(field, &rc.window_switcher.fields, link) {
-			buf.len = 0;
+			buf_clear(&buf);
 			cairo_move_to(cairo, x, y
 				+ theme->osd_window_switcher_item_padding_y
 				+ theme->osd_window_switcher_item_active_border_width);
 
-			switch (field->content) {
-			case LAB_FIELD_TYPE:
-				buf_add(&buf, get_type(*view));
-				break;
-			case LAB_FIELD_IDENTIFIER:
-				buf_add(&buf, get_app_id(*view));
-				break;
-			case LAB_FIELD_TRIMMED_IDENTIFIER:
-				{
-					char *s = (char *)get_app_id(*view);
-					buf_add(&buf, get_trimmed_app_id(s));
-					break;
-				}
-			case LAB_FIELD_TITLE:
-				buf_add(&buf, get_title_if_different(*view));
-				break;
-			default:
-				break;
-			}
+			osd_field_get_content(field, &buf, *view);
+
 			int field_width = (available_width - (nr_fields + 1)
 				* theme->osd_window_switcher_item_padding_x)
 				* field->width / 100.0;
 			pango_layout_set_width(layout, field_width * PANGO_SCALE);
-			pango_layout_set_text(layout, buf.buf, -1);
+			pango_layout_set_text(layout, buf.data, -1);
 			pango_cairo_show_layout(cairo, layout);
 			x += field_width + theme->osd_window_switcher_item_padding_x;
 		}
@@ -378,7 +306,7 @@ render_osd(struct server *server, cairo_t *cairo, int w, int h,
 			struct wlr_fbox fbox = {
 				.x = theme->osd_border_width + theme->osd_window_switcher_padding,
 				.y = y,
-				.width = theme->osd_window_switcher_width
+				.width = w
 					- 2 * theme->osd_border_width
 					- 2 * theme->osd_window_switcher_padding,
 				.height = theme->osd_window_switcher_item_height,
@@ -390,32 +318,27 @@ render_osd(struct server *server, cairo_t *cairo, int w, int h,
 
 		y += theme->osd_window_switcher_item_height;
 	}
-	free(buf.buf);
+	buf_reset(&buf);
 	g_object_unref(layout);
 
 	cairo_surface_flush(surf);
 }
 
 static void
-display_osd(struct output *output)
+display_osd(struct output *output, struct wl_array *views)
 {
 	struct server *server = output->server;
 	struct theme *theme = server->theme;
-	struct wl_list *node_list =
-		&server->workspace_current->tree->children;
 	bool show_workspace = wl_list_length(&rc.workspace_config.workspaces) > 1;
 	const char *workspace_name = server->workspace_current->name;
 
-	struct wl_array views;
-	wl_array_init(&views);
-	view_array_append(server, &views,
-		LAB_VIEW_CRITERIA_CURRENT_WORKSPACE
-		| LAB_VIEW_CRITERIA_NO_ALWAYS_ON_TOP
-		| LAB_VIEW_CRITERIA_NO_SKIP_WINDOW_SWITCHER);
-
 	float scale = output->wlr_output->scale;
 	int w = theme->osd_window_switcher_width;
-	int h = wl_array_len(&views) * rc.theme->osd_window_switcher_item_height
+	if (theme->osd_window_switcher_width_is_percent) {
+		w = output->wlr_output->width / output->wlr_output->scale
+			* theme->osd_window_switcher_width / 100;
+	}
+	int h = wl_array_len(views) * rc.theme->osd_window_switcher_item_height
 		+ 2 * rc.theme->osd_border_width
 		+ 2 * rc.theme->osd_window_switcher_padding;
 	if (show_workspace) {
@@ -435,9 +358,7 @@ display_osd(struct output *output)
 
 	/* Render OSD image */
 	cairo_t *cairo = output->osd_buffer->cairo;
-	render_osd(server, cairo, w, h, node_list, show_workspace,
-		workspace_name, &views);
-	wl_array_release(&views);
+	render_osd(server, cairo, w, h, show_workspace, workspace_name, views);
 
 	struct wlr_scene_buffer *scene_buffer = wlr_scene_buffer_create(
 		output->osd_tree, &output->osd_buffer->base);
@@ -461,12 +382,13 @@ display_osd(struct output *output)
 void
 osd_update(struct server *server)
 {
-	struct wl_list *node_list =
-		&server->workspace_current->tree->children;
+	struct wl_array views;
+	wl_array_init(&views);
+	view_array_append(server, &views, rc.window_switcher.criteria);
 
-	if (wl_list_empty(node_list) || !server->osd_state.cycle_view) {
+	if (!wl_array_len(&views) || !server->osd_state.cycle_view) {
 		osd_finish(server);
-		return;
+		goto out;
 	}
 
 	if (rc.window_switcher.show && rc.theme->osd_window_switcher_width > 0) {
@@ -475,7 +397,7 @@ osd_update(struct server *server)
 		wl_list_for_each(output, &server->outputs, link) {
 			destroy_osd_nodes(output);
 			if (output_is_usable(output)) {
-				display_osd(output);
+				display_osd(output, &views);
 			}
 		}
 	}
@@ -490,4 +412,6 @@ osd_update(struct server *server)
 	if (rc.window_switcher.preview) {
 		preview_cycled_view(server->osd_state.cycle_view);
 	}
+out:
+	wl_array_release(&views);
 }

@@ -90,7 +90,7 @@ modification.
 
 Openbox spec is somewhat of a stable standard considering how long it has
 remained unchanged for and how wide-spread its adoption is by lightweight
-distributions such as LXDE, LXQt, BunsenLabs, ArchLabs, Mabox and Raspian. Some
+distributions such as LXDE, LXQt, BunsenLabs, ArchLabs, Mabox and Raspbian. Some
 widely used themes (for example Numix and Arc) have built-in support.
 
 We could have invented a whole new syntax, but that's not where we want to
@@ -107,7 +107,7 @@ See [scope] for full details on implemented features.
 
 High-level summary of items that Labwc supports:
 
-- [x] Config files (rc.xml, autostart, environment, menu.xml)
+- [x] Config files (rc.xml, autostart, shutdown, environment, menu.xml)
 - [x] Theme files and xbm/png/svg icons
 - [x] Basic desktop and client menus
 - [x] HiDPI
@@ -117,11 +117,17 @@ High-level summary of items that Labwc supports:
 
 ### 1.5 Videos
 
-| video link     | date        | content
-| -------------- | ------------| -------
-| [Video (2:48)] | 31-Oct-2022 | 0.6.0 release video
-| [Video (1:10)] | 05-Aug-2021 | window gymnastics, theming and waybar
-| [Video (3:42)] | 25-Feb-2021 | setting background and themes; xwayland/xdg-shell windows
+| video link                | date        | duration
+| ------------------------- | ------------| -------
+| [0.7.2-release-video]     | 24-May-2024 | 3:17
+| [0.6.0-release-video]     | 31-Oct-2022 | 2:48
+| [0.3.0-release-video]     | 05-Aug-2021 | 1:10
+| [pre-0.1.0-release-video] | 25-Feb-2021 | 3:42
+
+[0.7.2-release-video]: https://youtu.be/gNIj6VU-IH8
+[0.6.0-release-video]: https://youtu.be/guBnx18EQiA
+[0.3.0-release-video]: https://youtu.be/AU_M3n_FS-E
+[pre-0.1.0-release-video]: https://youtu.be/rE1bQjSVJzg
 
 ### 1.6 Screenshot
 
@@ -176,7 +182,7 @@ prevent installing the wlroots headers:
 ## 3. Configuration
 
 User config files are located at `${XDG_CONFIG_HOME:-$HOME/.config/labwc/}`
-with the following five files being used: [rc.xml], [menu.xml], [autostart],
+with the following five files being used: [rc.xml], [menu.xml], [autostart], [shutdown],
 [environment] and [themerc-override].
 
 Run `labwc --reconfigure` to reload configuration and theme.
@@ -227,6 +233,7 @@ If you have not created an rc.xml config file, default bindings will be:
 | `alt`-`mouse-right`      | resize window
 | `alt`-`arrow`            | move window to edge
 | `super`-`arrow`          | resize window to fill half the output
+| `alt`-`space`            | show the window menu
 | `XF86_AudioLowerVolume`  | amixer sset Master 5%-
 | `XF86_AudioRaiseVolume`  | amixer sset Master 5%+
 | `XF86_AudioMute`         | amixer sset Master toggle
@@ -270,6 +277,7 @@ See [integration] for further details.
 [rc.xml]: docs/rc.xml.all
 [menu.xml]: docs/menu.xml
 [autostart]: docs/autostart
+[shutdown]: docs/shutdown
 [environment]: docs/environment
 [themerc-override]: docs/themerc
 [themerc]: docs/themerc
@@ -291,6 +299,3 @@ See [integration] for further details.
 [wlr-randr]: https://sr.ht/~emersion/wlr-randr/
 [swaylock]: https://github.com/swaywm/swaylock
 
-[Video (2:48)]: https://youtu.be/guBnx18EQiA
-[Video (1:10)]: https://youtu.be/AU_M3n_FS-E
-[Video (3:42)]: https://youtu.be/rE1bQjSVJzg

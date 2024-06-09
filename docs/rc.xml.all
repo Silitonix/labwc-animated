@@ -24,6 +24,7 @@
     <name></name>
     <cornerRadius>8</cornerRadius>
     <keepBorder>yes</keepBorder>
+    <dropShadows>no</dropShadows>
     <font place="ActiveWindow">
       <name>sans</name>
       <size>10</size>
@@ -54,7 +55,7 @@
     Just as for window-rules, 'identifier' relates to app_id for native Wayland
     windows and WM_CLASS for XWayland clients.
   -->
-  <windowSwitcher show="yes" preview="yes" outlines="yes">
+  <windowSwitcher show="yes" preview="yes" outlines="yes" allWorkspaces="no">
     <fields>
       <field content="type" width="25%" />
       <field content="trimmed_identifier" width="25%" />
@@ -62,6 +63,39 @@
       <field content="title" width="50%" />
     </fields>
   </windowSwitcher>
+
+  <!--
+    When using all workspaces option of window switcher, there are extra fields
+    that can be used, workspace (variable length), state (single space),
+    type_short (3 spaces), output (variable length), and can be set up
+    like this. Note: output only shows if more than one output available.
+
+    <windowSwitcher show="yes" preview="no" outlines="no" allWorkspaces="yes">
+      <fields>
+        <field content="workspace" width="5%" />
+        <field content="state" width="3%" />
+        <field content="type_short" width="3%" />
+        <field content="output" width="9%" />
+        <field content="identifier" width="30%" />
+        <field content="title" width="50%" />
+      </fields>
+    </windowSwitcher>
+
+    custom format - (introduced in 0.7.2)
+    It allows one to replace all the above "fields" with one line, using a
+    printf style format. For field explanations, "man 5 labwc-config".
+
+    The example below would print "foobar",then type of window (wayland, X),
+    then state of window (M/m/F), then output (shows if more than 1 active),
+    then workspace name, then identifier/app-id, then the window title.
+    Uses 100% of OSD window width.
+
+    <windowSwitcher show="yes" preview="no" outlines="no" allWorkspaces="yes">
+      <fields>
+        <field content="custom" format="foobar %b %3s %-10o %-20W %-10i %t" width="100%" />
+      </fields>
+    </windowSwitcher>
+  -->
 
   <!-- edge strength is in pixels -->
   <resistance>
@@ -81,6 +115,9 @@
   <snapping>
     <!-- Set range to 0 to disable window snapping completely -->
     <range>1</range>
+    <overlay enabled="yes">
+      <delay inner="500" outer="500" />
+    </overlay>
     <topMaximize>yes</topMaximize>
     <notifyClient>always</notifyClient>
   </snapping>
@@ -100,8 +137,20 @@
     Or it can also be configured like this:
     <desktops number="4" />
 
+    Or like this:
+    <desktops>
+      <popupTime>500</popupTime>
+      <number>5</number>
+      <prefix>ws</prefix>
+    </desktops>
+
+    Or:
+    <desktops number="4" popupTime="500" prefix="ws" />
+
     popupTime defaults to 1000 so could be left out.
     Set to 0 to completely disable the workspace OSD.
+
+    prefix defaults to "Workspace" when using number instead of names.
 
     Use GoToDesktop left | right to switch workspaces.
     Use SendToDesktop left | right to move windows.
@@ -423,7 +472,7 @@
   </mouse>
 
   <!--
-    A touch configuration can be bound to a specifc device. If device
+    A touch configuration can be bound to a specific device. If device
     name is left empty, the touch configuration applies to all touch
     devices or functions as a fallback. Multiple touch configurations
     can exist.
@@ -448,11 +497,18 @@
     height are omitted or default (0.0), width/height will be set to
     the remaining width/height seen from top/left.
 
-    Tablet buttons emulate regular mouse buttons. The tablet *button* can
-    be set to any of [Tip|Stylus|Stylus2|Stylus3|Pad|Pad2|Pad3|..|Pad9].
-    Valid *to* mouse buttons are [Left|Right|Middle].
+    The tablet can be forced to always use mouse emulation. This prevents
+    tablet specific restrictions, e.g. no support for drag&drop, but also
+    omits tablet specific features like reporting pen pressure.
+
+    Pen buttons emulate regular mouse buttons. The pen *button* can be any
+    of [Stylus|Stylus2|Stylus3] and can be mapped to mouse buttons
+    [Right|Middle|Side]. Tablet pad buttons [Pad|Pad2|Pad3|..|Pad9] also
+    emulate regular mouse buttons and can be mapped to any mouse button.
+    When using mouse emulation, the pen tip [tip] and the stylus buttons
+    can be set to any available mouse button [Left|Right|Middle|..|Task].
   -->
-  <tablet mapToOutput="" rotate="0">
+  <tablet mapToOutput="" rotate="0" mouseEmulation="no">
     <!-- Active area dimensions are in mm -->
     <area top="0.0" left="0.0" width="0.0" height="0.0" />
     <map button="Tip" to="Left" />
@@ -474,6 +530,7 @@
       - tapButtonMap [lrm|lmr]
       - clickMethod [none|buttonAreas|clickfinger]
       - sendEventsMode [yes|no|disabledOnExternalMouse]
+      - calibrationMatrix [six float values split by space]
   -->
   <libinput>
     <device category="default">
@@ -489,13 +546,14 @@
       <disableWhileTyping></disableWhileTyping>
       <clickMethod></clickMethod>
       <sendEventsMode></sendEventsMode>
+      <calibrationMatrix></calibrationMatrix>
     </device>
   </libinput>
 
   <!--
     # Window Rules
-    #   - Criteria can consist of 'identifier' or 'title' or both (in which
-    #     case AND logic is used).
+    #   - Criteria can consist of 'identifier', 'title', 'sandboxEngine' or
+    #     'sandboxAppId'. AND logic is used when multiple options are specified.
     #   - 'identifier' relates to app_id for native Wayland windows and
     #     WM_CLASS for XWayland clients.
     #   - Criteria can also contain `matchOnce="true"` meaning that the rule
@@ -529,10 +587,32 @@
         <action name="ToggleAlwaysOnBottom"/>
       </windowRule>
       <windowRule identifier="org.qutebrowser.qutebrowser">
-        <action name="ResizeTo" width="1024" y="800" />
+        <action name="ResizeTo" width="1024" height="800" />
         <action name="AutoPlace"/>
       </windowRule>
     </windowRules>
   -->
+
+  <menu>
+    <ignoreButtonReleasePeriod>250</ignoreButtonReleasePeriod>
+  </menu>
+
+  <!--
+    Magnifier settings
+    'width' sets the width in pixels of the magnifier window.
+    'height' sets the height in pixels of the magnifier window.
+    'initScale' sets the initial magnification factor at boot.
+    'increment' sets the amount by which the magnification factor
+      changes when 'ZoomIn' or 'ZoomOut' are called.
+    'useFilter' sets whether to use a bilinear filter on the magnified
+      output or simply to take nearest pixel.
+  -->
+  <magnifier>
+    <width>400</width>
+    <height>400</height>
+    <initScale>2.0</initScale>
+    <increment>0.2</increment>
+    <useFilter>true</useFilter>
+  </magnifier>
 
 </labwc_config>

@@ -43,4 +43,34 @@ void string_truncate_at_pattern(char *buf, const char *pattern);
  */
 char *strdup_printf(const char *fmt, ...);
 
+/**
+ * str_join - format and join an array of strings with a separator
+ * @parts: NULL-terminated array of string parts to be joined
+ * @fmt: printf-style format string applied to each part
+ * @sep: separator inserted between parts when joining
+ *
+ * A new string is allocated to hold the joined result. The user must free the
+ * returned string. Returns NULL on error.
+ *
+ * Each part of the array is converted via the equivalent of sprintf(output,
+ * fmt, part), so fmt should include a single "%s" format specification. If fmt
+ * is NULL, a default "%s" will be used to copy each part verbatim.
+ *
+ * The separator is arbitrary. When the separator is NULL, a single space will
+ * be used.
+ */
+char *str_join(const char *const parts[],
+	const char *restrict fmt, const char *restrict sep);
+
+/**
+ * str_endswith - indicate whether a string ends with a given suffix
+ * @string: string to test
+ * @suffix: suffix to expect in string
+ *
+ * If suffix is "" or NULL, this method always returns true; otherwise, this
+ * method returns true if and only if the full suffix exists at the end of the
+ * string.
+ */
+bool str_endswith(const char *const string, const char *const suffix);
+
 #endif /* LABWC_STRING_HELPERS_H */

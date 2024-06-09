@@ -4,9 +4,9 @@
 #include <wlr/util/box.h>
 #include <wlr/util/log.h>
 #include "common/macros.h"
-#include "common/scaled_font_buffer.h"
+#include "common/scaled-font-buffer.h"
 #include "labwc.h"
-#include "resize_indicator.h"
+#include "resize-indicator.h"
 #include "view.h"
 
 static void
@@ -199,7 +199,8 @@ resize_indicator_update(struct view *view)
 		(eff_height - indicator->height) / 2);
 
 	scaled_font_buffer_update(indicator->text, text, width, &rc.font_osd,
-		rc.theme->osd_label_text_color, NULL /* const char *arrow */);
+		rc.theme->osd_label_text_color, rc.theme->osd_bg_color,
+		NULL /* const char *arrow */);
 }
 
 void

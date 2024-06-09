@@ -376,25 +376,22 @@ edges_calculate_visibility(struct server *server, struct view *ignored_view)
 
 void
 edges_find_neighbors(struct border *nearest_edges, struct view *view,
-		struct wlr_box target, struct output *output,
-		edge_validator_t validator, bool use_pending, bool ignore_hidden)
+		struct wlr_box origin, struct wlr_box target,
+		struct output *output, edge_validator_t validator, bool ignore_hidden)
 {
 	assert(view);
 	assert(validator);
 	assert(nearest_edges);
 
 	if (!output_is_usable(view->output)) {
-		wlr_log(WLR_DEBUG, "ignoring edge search for view on unsable output");
+		wlr_log(WLR_DEBUG, "ignoring edge search for view on unusable output");
 		return;
 	}
 
 	struct border view_edges = { 0 };
 	struct border target_edges = { 0 };
 
-	struct wlr_box *view_geom =
-		use_pending ? &view->pending : &view->current;
-
-	edges_for_target_geometry(&view_edges, view, *view_geom);
+	edges_for_target_geometry(&view_edges, view, origin);
 	edges_for_target_geometry(&target_edges, view, target);
 
 	struct view *v;
@@ -437,8 +434,8 @@ edges_find_neighbors(struct border *nearest_edges, struct view *view,
 
 void
 edges_find_outputs(struct border *nearest_edges, struct view *view,
-		struct wlr_box target, struct output *output,
-		edge_validator_t validator, bool use_pending)
+		struct wlr_box origin, struct wlr_box target,
+		struct output *output, edge_validator_t validator)
 {
 	assert(view);
 	assert(validator);
@@ -446,17 +443,14 @@ edges_find_outputs(struct border *nearest_edges, struct view *view,
 
 	if (!output_is_usable(view->output)) {
 		wlr_log(WLR_DEBUG,
-			"ignoring edge search for view on unsable output");
+			"ignoring edge search for view on unusable output");
 		return;
 	}
 
 	struct border view_edges = { 0 };
 	struct border target_edges = { 0 };
 
-	struct wlr_box *view_geom =
-		use_pending ? &view->pending : &view->current;
-
-	edges_for_target_geometry(&view_edges, view, *view_geom);
+	edges_for_target_geometry(&view_edges, view, origin);
 	edges_for_target_geometry(&target_edges, view, target);
 
 	struct output *o;
@@ -473,7 +467,7 @@ edges_find_outputs(struct border *nearest_edges, struct view *view,
 			output_usable_area_in_layout_coords(o);
 
 		struct wlr_box ol;
-		if (!wlr_box_intersection(&ol, view_geom, &usable) &&
+		if (!wlr_box_intersection(&ol, &origin, &usable) &&
 				!wlr_box_intersection(&ol, &target, &usable)) {
 			continue;
 		}
@@ -599,7 +593,7 @@ linear_interp(int x, int x1, int y1, int x2, int y2)
 		return 0.5 * (y1 + y2);
 	}
 
-	/* Othewise, linearly interpolate */
+	/* Otherwise, linearly interpolate */
 	int dx = x - x1;
 	return y1 + dx * (rise / (double)run);
 }

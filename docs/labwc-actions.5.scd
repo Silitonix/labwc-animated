@@ -83,6 +83,9 @@ Actions are used in menus and keyboard/mouse bindings.
 *<action name="MoveToCursor" />*
 	Move to be centered on cursor.
 	Tries to prevent any part of the window from going off-screen.
+	This action is deprecated from v0.7.3. To ensure your config works in
+	future labwc releases, please use:
+	*<action name="AutoPlace" policy="cursor">*
 
 *<action name="MoveRelative" x="" y="" />*
 	Move window relative to its current position. Positive value of x moves
@@ -105,8 +108,28 @@ Actions are used in menus and keyboard/mouse bindings.
 *<action name="Reconfigure" />*
 	Re-load configuration and theme files.
 
-*<action name="ShowMenu" menu="value" />*
-	Show menu. Valid menu names are "root-menu" and "client-menu".
+*<action name="ShowMenu" menu="value" atCursor="yes" />*
+	Show a menu.
+
+	*menu* The name of the menu to show. The menus "root-menu" and
+	"client-menu" are guaranteed to exist, but others may be defined
+	explicitly. See labwc-menu(5) for more information.
+
+	*atCursor* [yes|no] When opening a menu, open the menu at the location
+	of the mouse cursor. When set to no, the menu will appear at the
+	upper-left corner of the window associated with the action. Default is
+	yes.
+
+*<action name="SetDecorations" decorations="value" forceSSD="no" />*
+	Set decorations of focused window.
+
+	*decorations* [full|border|none] *full* enables the whole server side
+	decorations. With *border*. only the borders and invisible resize area
+	are enabled. *none* disables everything.
+
+	*forceSSD* [yes|no] If this is no, this action will be ignored for
+	windows that have client side decorations if it would increase the
+	amount of decoration. Default is no.
 
 *<action name="ToggleDecorations" />*
 	Toggle decorations of focused window.
@@ -127,7 +150,12 @@ Actions are used in menus and keyboard/mouse bindings.
 	"both" (default), "horizontal", and "vertical".
 
 *<action name="Maximize" direction="value" />*
-	Maximize focused window. Supported directions are "both" (default),
+	Maximize focused window in the direction(s) specified. Supported
+	directions are "both" (default), "horizontal", and "vertical".
+
+*<action name="UnMaximize" direction="value" />*
+	Unmaximize focused window in the direction(s) specified and return it to
+	its pre-maximized dimensions. Supported directions are "both" (default),
 	"horizontal", and "vertical".
 
 *<action name="ToggleAlwaysOnTop" />*
@@ -163,14 +191,18 @@ Actions are used in menus and keyboard/mouse bindings.
 	to the center of the window. If the given output does not contain
 	any windows, the cursor is centered on the given output.
 
-*<action name="MoveToOutput" name="HDMI-A-1" direction="value" />*
+*<action name="MoveToOutput" output="HDMI-A-1" direction="value" wrap="no" />*
 	Moves active window to other output, unless the window state is
 	fullscreen.
 
-	If *name* is specified, the window will be sent directly to the specified
-	output and *direction* is ignored. If *name* is omitted, *direction* may
-	be one of "left", "right", "up" or "down" to indicate that the window
-	should be moved to the next output in that direction (if one exists). 
+	If *output* is specified, the window will be sent directly to the
+	specified output and *direction* is ignored. If *output* is omitted,
+	*direction* may be one of "left", "right", "up" or "down" to indicate
+	that the window should be moved to the next output in that direction
+	(if one exists).
+
+	*wrap* [yes|no] When using the direction attribute, wrap around from
+	right-to-left or top-to-bottom, and vice versa. Default no.
 
 *<action name="FitToOutput" />*
 	Resizes active window size to width and height of the output when the
@@ -225,7 +257,7 @@ Actions are used in menus and keyboard/mouse bindings.
 	smaller than "eDP-1" output to cut off bottom panel from screen sharing.
 
 	Virtual output is also useful for extending the desktop to (maybe
-	mobile)	remote systems like tablets. E.g. simply adding a virtual
+	mobile) remote systems like tablets. E.g. simply adding a virtual
 	output, attaching wayvnc to it and running a VNC client on the remote
 	system.
 
@@ -238,9 +270,12 @@ Actions are used in menus and keyboard/mouse bindings.
 	*output_name* The name of virtual output. If not supplied, will remove
 	the last virtual output added.
 
-*<action name="AutoPlace" />*
-	Use the automatic placement policy to move the active window to a
-	position on its output that will minimize overlap with other windows.
+*<action name="AutoPlace" policy="value"/>*
+	Reposition the window according to the desired placement policy.
+
+	*policy* [automatic|cursor|center] Use the specified policy, which has
+	the same meaning as the corresponding value for *<placement><policy>*.
+	Default is automatic.
 
 *<action name="Shade" />*++
 *<action name="Unshade" />*++
@@ -250,6 +285,18 @@ Actions are used in menus and keyboard/mouse bindings.
 	titlebar visible. Full-screen windows or those without server-side
 	decorations (including those for which the server-side titlebar has been
 	hidden) are not eligible for shading.
+
+*<action name="ToggleMagnify">*
+	Toggle the screen magnifier on or off at the last magnification level
+	used.
+
+*<action name="ZoomIn">*++
+*<action name="ZoomOut">*
+	Increase or decrease the magnification level for the screen magnifier.
+	If the magnifier is currently off, ZoomIn will enable it at the lowest
+	magnification, equal to (1 + the magnifier increment set in the theme).
+	If the magnifier is on and at the lowest magnification, ZoomOut will
+	turn it off.
 
 *<action name="None" />*
 	If used as the only action for a binding: clear an earlier defined
@@ -291,6 +338,10 @@ Actions that execute other actions. Used in keyboard/mouse bindings.
 			XDG shell title for Wayland clients, WM_NAME for
 			XWayland clients.
 
+		*type*
+			Internal heuristics for Wayland clients,
+			NET_WM_WINDOW_TYPE for XWayland clients.
+
 		This argument is optional.
 
 	*then*
@@ -304,6 +355,10 @@ Actions that execute other actions. Used in keyboard/mouse bindings.
 *<action name="ForEach">*
 	Identical to "If" action, but applies to all windows, not just the
 	focused one.
+
+	The *ForEach* action has another optional *none* branch which gets
+	executed when no window has been matched by the query. This allows
+	for example to implement a run-or-raise functionality.
 
 # SEE ALSO
 

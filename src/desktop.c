@@ -2,10 +2,12 @@
 #include "config.h"
 #include <assert.h>
 #include "common/scene-helpers.h"
+#include "common/surface-helpers.h"
 #include "dnd.h"
 #include "labwc.h"
 #include "layers.h"
 #include "node.h"
+#include "osd.h"
 #include "ssd.h"
 #include "view.h"
 #include "window-rules.h"
@@ -106,116 +108,40 @@ desktop_focus_view_or_surface(struct seat *seat, struct view *view,
 	}
 }
 
-static struct wl_list *
-get_prev_item(struct wl_list *item)
-{
-	return item->prev;
-}
-
-static struct wl_list *
-get_next_item(struct wl_list *item)
-{
-	return item->next;
-}
-
-static struct view *
-first_view(struct server *server)
-{
-	struct wlr_scene_node *node;
-	struct wl_list *list_head =
-		&server->workspace_current->tree->children;
-	wl_list_for_each_reverse(node, list_head, link) {
-		if (!node->data) {
-			/* We found some non-view, most likely the region overlay */
-			continue;
-		}
-		struct view *view = node_view_from_node(node);
-		if (view_is_focusable(view)) {
-			return view;
-		}
-	}
-	return NULL;
-}
-
 struct view *
 desktop_cycle_view(struct server *server, struct view *start_view,
 		enum lab_cycle_dir dir)
 {
+	/* Make sure to have all nodes in their actual ordering */
+	osd_preview_restore(server);
+
+	struct view *(*iter)(struct wl_list *head, struct view *view,
+		enum lab_view_criteria criteria);
+	bool forwards = dir == LAB_CYCLE_DIR_FORWARD;
+	iter = forwards ? view_next_no_head_stop : view_prev_no_head_stop;
+
+	enum lab_view_criteria criteria = rc.window_switcher.criteria;
+
 	/*
-	 * Views are listed in stacking order, topmost first.  Usually
-	 * the topmost view is already focused, so we pre-select the
-	 * view second from the top:
+	 * Views are listed in stacking order, topmost first.  Usually the
+	 * topmost view is already focused, so when iterating in the forward
+	 * direction we pre-select the view second from the top:
 	 *
 	 *   View #1 (on top, currently focused)
 	 *   View #2 (pre-selected)
 	 *   View #3
 	 *   ...
-	 *
-	 * This assumption doesn't always hold with XWayland views,
-	 * where a main application window may be focused but an
-	 * focusable sub-view (e.g. an about dialog) may still be on
-	 * top of it.  In that case, we pre-select the sub-view:
-	 *
-	 *   Sub-view of #1 (on top, pre-selected)
-	 *   Main view #1 (currently focused)
-	 *   Main view #2
-	 *   ...
-	 *
-	 * The general rule is:
-	 *
-	 *   - Pre-select the top view if NOT already focused
-	 *   - Otherwise select the view second from the top
 	 */
-
-	/* Make sure to have all nodes in their actual ordering */
-	osd_preview_restore(server);
-
-	if (!start_view) {
-		start_view = first_view(server);
-		if (!start_view || start_view != server->active_view) {
-			return start_view;  /* may be NULL */
-		}
+	if (!start_view && forwards) {
+		start_view = iter(&server->views, NULL, criteria);
 	}
-	struct view *view = start_view;
-	struct wlr_scene_node *node = &view->scene_tree->node;
 
-	assert(node->parent);
-	struct wl_list *list_head = &node->parent->children;
-	struct wl_list *list_item = &node->link;
-	struct wl_list *(*iter)(struct wl_list *list);
-
-	/* Scene nodes are ordered like last node == displayed topmost */
-	iter = dir == LAB_CYCLE_DIR_FORWARD ? get_prev_item : get_next_item;
-
-	do {
-		list_item = iter(list_item);
-		if (list_item == list_head) {
-			/* Start / End of list reached. Roll over */
-			list_item = iter(list_item);
-		}
-		node = wl_container_of(list_item, node, link);
-		if (!node->data) {
-			/* We found some non-view, most likely the region overlay */
-			view = NULL;
-			continue;
-		}
-		view = node_view_from_node(node);
-
-		enum property skip = window_rules_get_property(view, "skipWindowSwitcher");
-		if (view_is_focusable(view) && skip != LAB_PROP_TRUE) {
-			return view;
-		}
-	} while (view != start_view);
-
-	/* No focusable views found, including the one we started with */
-	return NULL;
+	return iter(&server->views, start_view, criteria);
 }
 
 struct view *
 desktop_topmost_focusable_view(struct server *server)
 {
-	struct wlr_surface *prev =
-		server->seat.seat->keyboard_state.focused_surface;
 	struct view *view;
 	struct wl_list *node_list;
 	struct wlr_scene_node *node;
@@ -226,7 +152,7 @@ desktop_topmost_focusable_view(struct server *server)
 			continue;
 		}
 		view = node_view_from_node(node);
-		if (view->mapped && view_is_focusable_from(view, prev)) {
+		if (view->mapped && view_is_focusable(view)) {
 			return view;
 		}
 	}
@@ -303,14 +229,23 @@ desktop_update_top_layer_visiblity(struct server *server)
 		wlr_scene_node_set_enabled(&output->layer_tree[top]->node, true);
 	}
 
-	/* And disable them again when there is a view in fullscreen */
-	enum lab_view_criteria criteria =
-		LAB_VIEW_CRITERIA_CURRENT_WORKSPACE | LAB_VIEW_CRITERIA_FULLSCREEN;
-	for_each_view(view, &server->views, criteria) {
+	/*
+	 * And disable them again when there is a fullscreen view without
+	 * any views above it
+	 */
+	uint64_t outputs_covered = 0;
+	for_each_view(view, &server->views, LAB_VIEW_CRITERIA_CURRENT_WORKSPACE) {
+		if (view->minimized) {
+			continue;
+		}
 		if (!output_is_usable(view->output)) {
 			continue;
 		}
-		wlr_scene_node_set_enabled(&view->output->layer_tree[top]->node, false);
+		if (view->fullscreen && !(view->outputs & outputs_covered)) {
+			wlr_scene_node_set_enabled(
+				&view->output->layer_tree[top]->node, false);
+		}
+		outputs_covered |= view->outputs;
 	}
 }
 
@@ -329,21 +264,6 @@ get_surface_from_layer_node(struct wlr_scene_node *node)
 		return popup->wlr_popup->base->surface;
 	}
 	return NULL;
-}
-
-static bool
-is_layer_descendant(struct wlr_scene_node *node)
-{
-	goto start;
-	while (node) {
-		struct node_descriptor *desc = node->data;
-		if (desc && desc->type == LAB_NODE_DESC_LAYER_SURFACE) {
-			return true;
-		}
-start:
-		node = node->parent ? &node->parent->node : NULL;
-	}
-	return false;
 }
 
 /* TODO: make this less big and scary */
@@ -416,6 +336,11 @@ get_cursor_context(struct server *server)
 				ret.type = LAB_SSD_CLIENT;
 				ret.surface = get_surface_from_layer_node(node);
 				return ret;
+			case LAB_NODE_DESC_SESSION_LOCK_SURFACE: /* fallthrough */
+			case LAB_NODE_DESC_IME_POPUP:
+				ret.type = LAB_SSD_CLIENT;
+				ret.surface = lab_wlr_surface_from_node(ret.node);
+				return ret;
 			case LAB_NODE_DESC_MENUITEM:
 				/* Always return the top scene node for menu items */
 				ret.node = node;
@@ -430,24 +355,23 @@ get_cursor_context(struct server *server)
 		/* Edge-case nodes without node-descriptors */
 		if (node->type == WLR_SCENE_NODE_BUFFER) {
 			struct wlr_surface *surface = lab_wlr_surface_from_node(node);
-			if (surface) {
-				if (wlr_layer_surface_v1_try_from_wlr_surface(surface)) {
-					ret.type = LAB_SSD_LAYER_SURFACE;
-				}
-				if (is_layer_descendant(node)) {
-					/*
-					 * layer-shell subsurfaces need to be
-					 * able to receive pointer actions.
-					 *
-					 * Test by running
-					 * `gtk-layer-demo -k exclusive`, then
-					 * open the 'set margin' dialog and try
-					 * setting the margin with the pointer.
-					 */
-					ret.surface = surface;
-					ret.type = LAB_SSD_LAYER_SUBSURFACE;
-					return ret;
-				}
+
+			/*
+			 * Handle layer-shell subsurfaces
+			 *
+			 * These don't have node-descriptors, but need to be
+			 * able to receive pointer actions so we have to process
+			 * them here.
+			 *
+			 * Test by running `gtk-layer-demo -k exclusive`, then
+			 * open the 'set margin' dialog and try setting the
+			 * margin with the pointer.
+			 */
+			if (surface && wlr_subsurface_try_from_wlr_surface(surface)
+					&& subsurface_parent_layer(surface)) {
+				ret.surface = surface;
+				ret.type = LAB_SSD_LAYER_SUBSURFACE;
+				return ret;
 			}
 		}
 

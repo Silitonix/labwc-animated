@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
+#include <assert.h>
 #include <ctype.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -82,4 +83,90 @@ strdup_printf(const char *fmt, ...)
 		return NULL;
 	}
 	return p;
+}
+
+char *
+str_join(const char *const parts[],
+		const char *restrict fmt, const char *restrict sep)
+{
+	assert(parts);
+
+	if (!fmt) {
+		fmt = "%s";
+	}
+
+	if (!sep) {
+		sep = " ";
+	}
+
+	size_t size = 0;
+	size_t n_parts = 0;
+
+	size_t sep_len = strlen(sep);
+
+	/* Count the length of each formatted string */
+	for (const char *const *s = parts; *s; ++s) {
+		int n = snprintf(NULL, 0, fmt, *s);
+		if (n < 0) {
+			return NULL;
+		}
+		size += (size_t)n;
+		++n_parts;
+	}
+
+	if (n_parts < 1) {
+		return NULL;
+	}
+
+	/* Need (n_parts - 1) separators, plus one NULL terminator */
+	size += (n_parts - 1) * sep_len + 1;
+
+	/* Concatenate the strings and separators */
+	char *buf = xzalloc(size);
+	char *p = buf;
+	for (const char *const *s = parts; *s; ++s) {
+		int n = 0;
+
+		if (p != buf) {
+			n = snprintf(p, size, "%s", sep);
+			if (n < 0 || (size_t)n >= size) {
+				p = NULL;
+				break;
+			}
+			size -= (size_t)n;
+			p += (size_t)n;
+		}
+
+		n = snprintf(p, size, fmt, *s);
+		if (n < 0 || (size_t)n >= size) {
+			p = NULL;
+			break;
+		}
+		size -= (size_t)n;
+		p += (size_t)n;
+	}
+
+	if (!p) {
+		free(buf);
+		return NULL;
+	}
+
+	return buf;
+}
+
+bool
+str_endswith(const char *const string, const char *const suffix)
+{
+	size_t len_str = string ? strlen(string) : 0;
+	size_t len_sfx = suffix ? strlen(suffix) : 0;
+
+	if (len_str < len_sfx) {
+		return false;
+	}
+
+	if (len_sfx == 0) {
+		return true;
+	}
+
+	return strcmp(string + len_str - len_sfx, suffix) == 0;
 }

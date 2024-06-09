@@ -40,10 +40,14 @@
 #include <wlr/types/wlr_virtual_pointer_v1.h>
 #include <wlr/types/wlr_virtual_keyboard_v1.h>
 #include <wlr/types/wlr_tearing_control_v1.h>
+#include <wlr/types/wlr_text_input_v3.h>
+#include <wlr/types/wlr_input_method_v2.h>
+#include <wlr/types/wlr_tablet_v2.h>
 #include <wlr/util/log.h>
 #include "config/keybind.h"
 #include "config/rcxml.h"
 #include "input/cursor.h"
+#include "overlay.h"
 #include "regions.h"
 #include "session-lock.h"
 #if HAVE_NLS
@@ -75,7 +79,7 @@ struct input {
  * Virtual keyboards should not belong to seat->keyboard_group. As a result we
  * need to be able to ascertain which wlr_keyboard key/modifier events come from
  * and we achieve that by using `struct keyboard` which inherits `struct input`
- * and adds keybord specific listeners and a wlr_keyboard pointer.
+ * and adds keyboard specific listeners and a wlr_keyboard pointer.
  */
 struct keyboard {
 	struct input base;
@@ -120,6 +124,8 @@ struct seat {
 	/* if set, views cannot receive focus */
 	struct wlr_layer_surface_v1 *focused_layer;
 
+	struct input_method_relay *input_method_relay;
+
 	/**
 	 * pressed view/surface/node will usually be NULL and is only set on
 	 * button press while the mouse is over a view or surface, and reset
@@ -129,6 +135,10 @@ struct seat {
 	 *
 	 * This allows to keep dragging a scrollbar or selecting text even
 	 * when moving outside of the window.
+	 *
+	 * It is also used to:
+	 * - determine the target view for action in "Drag" mousebind
+	 * - validate view move/resize requests from CSD clients
 	 *
 	 * Both (view && !surface) and (surface && !view) are possible.
 	 */
@@ -150,9 +160,7 @@ struct seat {
 		struct wlr_scene_tree *icons;
 	} drag;
 
-	/* Private use by regions.c */
-	struct region *region_active;
-	struct region_overlay region_overlay;
+	struct overlay overlay;
 	/* Used to prevent region snapping when starting a move with A-Left */
 	bool region_prevent_snap;
 
@@ -185,6 +193,8 @@ struct seat {
 	struct wl_listener touch_motion;
 	struct wl_listener touch_frame;
 
+	struct wl_list tablet_tools;
+
 	struct wl_listener constraint_commit;
 	struct wl_listener pressed_surface_destroy;
 
@@ -206,7 +216,6 @@ struct server {
 	struct wlr_backend *backend;
 	struct headless {
 		struct wlr_backend *backend;
-		char pending_output_name[4096];
 	} headless;
 	struct wlr_session *session;
 
@@ -307,7 +316,7 @@ struct server {
 	struct wlr_gamma_control_manager_v1 *gamma_control_manager_v1;
 	struct wl_listener gamma_control_set_gamma;
 
-	struct session_lock *session_lock;
+	struct session_lock_manager *session_lock_manager;
 
 	struct wlr_foreign_toplevel_manager_v1 *foreign_toplevel_manager;
 
@@ -324,11 +333,18 @@ struct server {
 	struct wlr_tearing_control_manager_v1 *tearing_control;
 	struct wl_listener tearing_new_object;
 
+	struct wlr_input_method_manager_v2 *input_method_manager;
+	struct wlr_text_input_manager_v3 *text_input_manager;
+
+	struct wlr_tablet_manager_v2 *tablet_manager;
+	struct wlr_security_context_manager_v1 *security_context_manager_v1;
+
 	/* Set when in cycle (alt-tab) mode */
 	struct osd_state {
 		struct view *cycle_view;
 		bool preview_was_enabled;
 		struct wlr_scene_node *preview_node;
+		struct wlr_scene_tree *preview_parent;
 		struct wlr_scene_node *preview_anchor;
 		struct multi_rect *preview_outline;
 	} osd_state;
@@ -337,6 +353,8 @@ struct server {
 
 	struct menu *menu_current;
 	struct wl_list menus;
+
+	pid_t primary_client_pid;
 };
 
 #define LAB_NR_LAYERS (4)
@@ -467,6 +485,8 @@ void seat_output_layout_changed(struct seat *seat);
 void interactive_begin(struct view *view, enum input_mode mode, uint32_t edges);
 void interactive_finish(struct view *view);
 void interactive_cancel(struct view *view);
+/* Possibly returns VIEW_EDGE_CENTER if <topMaximize> is yes */
+enum view_edge edge_from_cursor(struct seat *seat, struct output **dest_output);
 
 void output_init(struct server *server);
 void output_manager_init(struct server *server);
@@ -482,23 +502,12 @@ struct wlr_box output_usable_area_in_layout_coords(struct output *output);
 struct wlr_box output_usable_area_scaled(struct output *output);
 void handle_output_power_manager_set_mode(struct wl_listener *listener,
 	void *data);
-void output_add_virtual(struct server *server, const char *output_name);
-void output_remove_virtual(struct server *server, const char *output_name);
 void output_enable_adaptive_sync(struct wlr_output *output, bool enabled);
 void new_tearing_hint(struct wl_listener *listener, void *data);
 
 void server_init(struct server *server);
 void server_start(struct server *server);
 void server_finish(struct server *server);
-
-/* Updates onscreen display 'alt-tab' buffer */
-void osd_update(struct server *server);
-/* Closes the OSD */
-void osd_finish(struct server *server);
-/* Moves preview views back into their original stacking order and state */
-void osd_preview_restore(struct server *server);
-/* Notify OSD about a destroying view */
-void osd_on_view_destroy(struct view *view);
 
 /*
  * wlroots "input inhibitor" extension (required for swaylock) blocks

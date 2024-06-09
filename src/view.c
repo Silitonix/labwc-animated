@@ -2,6 +2,8 @@
 #include <assert.h>
 #include <stdio.h>
 #include <strings.h>
+#include <wlr/types/wlr_output_layout.h>
+#include <wlr/types/wlr_security_context_v1.h>
 #include "common/macros.h"
 #include "common/match.h"
 #include "common/mem.h"
@@ -9,9 +11,11 @@
 #include "input/keyboard.h"
 #include "labwc.h"
 #include "menu/menu.h"
+#include "osd.h"
 #include "placement.h"
 #include "regions.h"
-#include "resize_indicator.h"
+#include "resize-indicator.h"
+#include "snap-constraints.h"
 #include "snap.h"
 #include "ssd.h"
 #include "view.h"
@@ -50,12 +54,33 @@ view_from_wlr_surface(struct wlr_surface *surface)
 	return NULL;
 }
 
+static const struct wlr_security_context_v1_state *
+security_context_from_view(struct view *view)
+{
+	if (view && view->surface && view->surface->resource) {
+		struct wl_client *client = wl_resource_get_client(view->surface->resource);
+		return wlr_security_context_manager_v1_lookup_client(
+			view->server->security_context_manager_v1, client);
+	}
+	return NULL;
+}
+
+struct view_query *
+view_query_create(void)
+{
+	struct view_query *query = znew(*query);
+	query->window_type = -1;
+	return query;
+}
+
 void
 view_query_free(struct view_query *query)
 {
 	wl_list_remove(&query->link);
 	free(query->identifier);
 	free(query->title);
+	free(query->sandbox_engine);
+	free(query->sandbox_app_id);
 	free(query);
 }
 
@@ -68,13 +93,34 @@ view_matches_query(struct view *view, struct view_query *query)
 	const char *identifier = view_get_string_prop(view, "app_id");
 	if (match && query->identifier) {
 		empty = false;
-		match &= match_glob(query->identifier, identifier);
+		match &= identifier && match_glob(query->identifier, identifier);
 	}
 
 	const char *title = view_get_string_prop(view, "title");
 	if (match && query->title) {
 		empty = false;
-		match &= match_glob(query->title, title);
+		match &= title && match_glob(query->title, title);
+	}
+
+	if (match && query->window_type >= 0) {
+		empty = false;
+		match &= view_contains_window_type(view, query->window_type);
+	}
+
+	if (match && query->sandbox_engine) {
+		const struct wlr_security_context_v1_state *security_context =
+			security_context_from_view(view);
+		empty = false;
+		match &= security_context && security_context->sandbox_engine
+			&& match_glob(query->sandbox_engine, security_context->sandbox_engine);
+	}
+
+	if (match && query->sandbox_app_id) {
+		const struct wlr_security_context_v1_state *security_context =
+			security_context_from_view(view);
+		empty = false;
+		match &= security_context && security_context->app_id
+			&& match_glob(query->sandbox_app_id, security_context->app_id);
 	}
 
 	return !empty && match;
@@ -107,6 +153,11 @@ matches_criteria(struct view *view, enum lab_view_criteria criteria)
 			return false;
 		}
 	}
+	if (criteria & LAB_VIEW_CRITERIA_ROOT_TOPLEVEL) {
+		if (view != view_get_root(view)) {
+			return false;
+		}
+	}
 	if (criteria & LAB_VIEW_CRITERIA_NO_ALWAYS_ON_TOP) {
 		if (view_is_always_on_top(view)) {
 			return false;
@@ -136,6 +187,48 @@ view_next(struct wl_list *head, struct view *view, enum lab_view_criteria criter
 	return NULL;
 }
 
+struct view *
+view_next_no_head_stop(struct wl_list *head, struct view *from,
+		enum lab_view_criteria criteria)
+{
+	assert(head);
+
+	struct wl_list *elm = from ? &from->link : head;
+
+	struct wl_list *end = elm;
+	for (elm = elm->next; elm != end; elm = elm->next) {
+		if (elm == head) {
+			continue;
+		}
+		struct view *view = wl_container_of(elm, view, link);
+		if (matches_criteria(view, criteria)) {
+			return view;
+		}
+	}
+	return from;
+}
+
+struct view *
+view_prev_no_head_stop(struct wl_list *head, struct view *from,
+		enum lab_view_criteria criteria)
+{
+	assert(head);
+
+	struct wl_list *elm = from ? &from->link : head;
+
+	struct wl_list *end = elm;
+	for (elm = elm->prev; elm != end; elm = elm->prev) {
+		if (elm == head) {
+			continue;
+		}
+		struct view *view = wl_container_of(elm, view, link);
+		if (matches_criteria(view, criteria)) {
+			return view;
+		}
+	}
+	return from;
+}
+
 void
 view_array_append(struct server *server, struct wl_array *views,
 		enum lab_view_criteria criteria)
@@ -162,28 +255,26 @@ view_wants_focus(struct view *view)
 }
 
 bool
-view_is_focusable_from(struct view *view, struct wlr_surface *prev)
+view_contains_window_type(struct view *view, enum window_type window_type)
+{
+	assert(view);
+	if (view->impl->contains_window_type) {
+		return view->impl->contains_window_type(view, window_type);
+	}
+	return false;
+}
+
+bool
+view_is_focusable(struct view *view)
 {
 	assert(view);
 	if (!view->surface) {
 		return false;
 	}
-	if (!view->mapped && !view->minimized) {
+	if (view_wants_focus(view) != VIEW_WANTS_FOCUS_ALWAYS) {
 		return false;
 	}
-	enum view_wants_focus wants_focus = view_wants_focus(view);
-	/*
-	 * Consider "offer focus" (Globally Active) views as focusable
-	 * only if another surface from the same application already had
-	 * focus. The goal is to allow focusing a parent window when a
-	 * dialog/popup is closed, but still avoid focusing standalone
-	 * panels/toolbars/notifications. Note that we are basically
-	 * guessing whether Globally Active views want focus, and will
-	 * probably be wrong some of the time.
-	 */
-	return (wants_focus == VIEW_WANTS_FOCUS_ALWAYS
-		|| (wants_focus == VIEW_WANTS_FOCUS_OFFER
-			&& prev && view_is_related(view, prev)));
+	return (view->mapped || view->minimized);
 }
 
 /**
@@ -339,16 +430,20 @@ view_update_outputs(struct view *view)
 	struct output *output;
 	struct wlr_output_layout *layout = view->server->output_layout;
 
-	view->outputs = 0;
+	uint64_t new_outputs = 0;
 	wl_list_for_each(output, &view->server->outputs, link) {
 		if (output_is_usable(output) && wlr_output_layout_intersects(
 				layout, output->wlr_output, &view->current)) {
-			view->outputs |= (1ull << output->scene_output->index);
+			new_outputs |= (1ull << output->scene_output->index);
 		}
 	}
 
-	if (view->toplevel.handle) {
-		foreign_toplevel_update_outputs(view);
+	if (new_outputs != view->outputs) {
+		view->outputs = new_outputs;
+		if (view->toplevel.handle) {
+			foreign_toplevel_update_outputs(view);
+		}
+		desktop_update_top_layer_visiblity(view->server);
 	}
 }
 
@@ -600,6 +695,11 @@ view_minimize(struct view *view, bool minimized)
 	struct view *root = view_get_root(view);
 	_minimize(root, minimized);
 	minimize_sub_views(root, minimized);
+
+	/* Enable top-layer when full-screen views are minimized */
+	if (view->fullscreen && view->output) {
+		desktop_update_top_layer_visiblity(view->server);
+	}
 }
 
 bool
@@ -628,12 +728,16 @@ view_compute_centered_position(struct view *view, const struct wlr_box *ref,
 	*x = ref->x + (ref->width - width) / 2;
 	*y = ref->y + (ref->height - height) / 2;
 
-	/* If view is bigger than usable area, just top/left align it */
+	/* Fit the view within the usable area */
 	if (*x < usable.x) {
 		*x = usable.x;
+	} else if (*x + width > usable.x + usable.width) {
+		*x = usable.x + usable.width - width;
 	}
 	if (*y < usable.y) {
 		*y = usable.y;
+	} else if (*y + height > usable.y + usable.height) {
+		*y = usable.y + usable.height - height;
 	}
 
 	*x += margin.left;
@@ -771,12 +875,13 @@ view_center(struct view *view, const struct wlr_box *ref)
 }
 
 void
-view_place_initial(struct view *view, bool allow_cursor)
+view_place_by_policy(struct view *view, bool allow_cursor,
+		enum view_placement_policy policy)
 {
-	if (allow_cursor && rc.placement_policy == LAB_PLACE_CURSOR) {
+	if (allow_cursor && policy == LAB_PLACE_CURSOR) {
 		view_move_to_cursor(view);
 		return;
-	} else if (rc.placement_policy == LAB_PLACE_AUTOMATIC) {
+	} else if (policy == LAB_PLACE_AUTOMATIC) {
 		struct wlr_box geometry = view->pending;
 		if (placement_find_best(view, &geometry)) {
 			view_move(view, geometry.x, geometry.y);
@@ -1155,30 +1260,61 @@ view_toggle_maximize(struct view *view, enum view_axis axis)
 	}
 }
 
+bool
+view_wants_decorations(struct view *view)
+{
+	/* Window-rules take priority if they exist for this view */
+	switch (window_rules_get_property(view, "serverDecoration")) {
+	case LAB_PROP_TRUE:
+		return true;
+	case LAB_PROP_FALSE:
+		return false;
+	default:
+		break;
+	}
+
+	/*
+	 * view->ssd_preference may be set by the decoration implementation
+	 * e.g. src/decorations/xdg-deco.c or src/decorations/kde-deco.c.
+	 */
+	switch (view->ssd_preference) {
+	case LAB_SSD_PREF_SERVER:
+		return true;
+	case LAB_SSD_PREF_CLIENT:
+		return false;
+	default:
+		/*
+		 * We don't know anything about the client preference
+		 * so fall back to core.decoration settings in rc.xml
+		 */
+		return rc.xdg_shell_server_side_deco;
+	}
+}
+
+void
+view_set_decorations(struct view *view, enum ssd_mode mode, bool force_ssd)
+{
+	assert(view);
+
+	if (force_ssd || view_wants_decorations(view)
+			|| mode < view_get_ssd_mode(view)) {
+		view_set_ssd_mode(view, mode);
+	}
+}
+
 void
 view_toggle_decorations(struct view *view)
 {
 	assert(view);
 
-	/* Reject decoration toggles when shaded */
-	if (view->shaded) {
-		return;
+	enum ssd_mode mode = view_get_ssd_mode(view);
+	if (rc.ssd_keep_border && mode == LAB_SSD_MODE_FULL) {
+		view_set_ssd_mode(view, LAB_SSD_MODE_BORDER);
+	} else if (mode != LAB_SSD_MODE_NONE) {
+		view_set_ssd_mode(view, LAB_SSD_MODE_NONE);
+	} else {
+		view_set_ssd_mode(view, LAB_SSD_MODE_FULL);
 	}
-
-	if (rc.ssd_keep_border && view->ssd_enabled && view->ssd
-			&& !view->ssd_titlebar_hidden) {
-		/*
-		 * ssd_titlebar_hidden has to be set before calling
-		 * ssd_titlebar_hide() to make ssd_thickness() happy.
-		 */
-		view->ssd_titlebar_hidden = true;
-		ssd_titlebar_hide(view->ssd);
-		if (!view_is_floating(view)) {
-			view_apply_special_geometry(view);
-		}
-		return;
-	}
-	view_set_decorations(view, !view->ssd_enabled);
 }
 
 bool
@@ -1260,26 +1396,46 @@ undecorate(struct view *view)
 	view->ssd = NULL;
 }
 
-void
-view_set_decorations(struct view *view, bool decorations)
+enum ssd_mode
+view_get_ssd_mode(struct view *view)
 {
 	assert(view);
 
-	if (view->ssd_enabled != decorations && !view->fullscreen) {
-		/*
-		 * Set view->ssd_enabled first since it is referenced
-		 * within the call tree of ssd_create()
-		 */
-		view->ssd_enabled = decorations;
-		if (decorations) {
-			decorate(view);
-		} else {
-			undecorate(view);
-			view->ssd_titlebar_hidden = false;
-		}
-		if (!view_is_floating(view)) {
-			view_apply_special_geometry(view);
-		}
+	if (!view->ssd_enabled) {
+		return LAB_SSD_MODE_NONE;
+	} else if (view->ssd_titlebar_hidden) {
+		return LAB_SSD_MODE_BORDER;
+	} else {
+		return LAB_SSD_MODE_FULL;
+	}
+}
+
+void
+view_set_ssd_mode(struct view *view, enum ssd_mode mode)
+{
+	assert(view);
+
+	if (view->shaded || view->fullscreen
+			|| mode == view_get_ssd_mode(view)) {
+		return;
+	}
+
+	/*
+	 * Set these first since they are referenced
+	 * within the call tree of ssd_create() and ssd_thickness()
+	 */
+	view->ssd_enabled = mode != LAB_SSD_MODE_NONE;
+	view->ssd_titlebar_hidden = mode != LAB_SSD_MODE_FULL;
+
+	if (view->ssd_enabled) {
+		decorate(view);
+		ssd_set_titlebar(view->ssd, !view->ssd_titlebar_hidden);
+	} else {
+		undecorate(view);
+	}
+
+	if (!view_is_floating(view)) {
+		view_apply_special_geometry(view);
 	}
 }
 
@@ -1519,8 +1675,44 @@ view_on_output_destroy(struct view *view)
 	view->output = NULL;
 }
 
+static enum wlr_direction
+opposite_direction(enum wlr_direction direction)
+{
+	switch (direction) {
+	case WLR_DIRECTION_RIGHT:
+		return WLR_DIRECTION_LEFT;
+	case WLR_DIRECTION_LEFT:
+		return WLR_DIRECTION_RIGHT;
+	case WLR_DIRECTION_DOWN:
+		return WLR_DIRECTION_UP;
+	case WLR_DIRECTION_UP:
+		return WLR_DIRECTION_DOWN;
+	default:
+		return 0;
+	}
+}
+
+static enum wlr_direction
+get_wlr_direction(enum view_edge edge)
+{
+	switch (edge) {
+	case VIEW_EDGE_LEFT:
+		return WLR_DIRECTION_LEFT;
+	case VIEW_EDGE_RIGHT:
+		return WLR_DIRECTION_RIGHT;
+	case VIEW_EDGE_UP:
+		return WLR_DIRECTION_UP;
+	case VIEW_EDGE_DOWN:
+		return WLR_DIRECTION_DOWN;
+	case VIEW_EDGE_CENTER:
+	case VIEW_EDGE_INVALID:
+	default:
+		return 0;
+	}
+}
+
 struct output *
-view_get_adjacent_output(struct view *view, enum view_edge edge)
+view_get_adjacent_output(struct view *view, enum view_edge edge, bool wrap)
 {
 	assert(view);
 	struct output *output = view->output;
@@ -1530,32 +1722,31 @@ view_get_adjacent_output(struct view *view, enum view_edge edge)
 		return NULL;
 	}
 
+	struct wlr_box box = output_usable_area_in_layout_coords(output);
+	int lx = box.x + box.width / 2;
+	int ly = box.y + box.height / 2;
+
 	/* Determine any adjacent output in the appropriate direction */
 	struct wlr_output *new_output = NULL;
 	struct wlr_output *current_output = output->wlr_output;
 	struct wlr_output_layout *layout = view->server->output_layout;
-	switch (edge) {
-	case VIEW_EDGE_LEFT:
-		new_output = wlr_output_layout_adjacent_output(
-			layout, WLR_DIRECTION_LEFT, current_output, 1, 0);
-		break;
-	case VIEW_EDGE_RIGHT:
-		new_output = wlr_output_layout_adjacent_output(
-			layout, WLR_DIRECTION_RIGHT, current_output, 1, 0);
-		break;
-	case VIEW_EDGE_UP:
-		new_output = wlr_output_layout_adjacent_output(
-			layout, WLR_DIRECTION_UP, current_output, 0, 1);
-		break;
-	case VIEW_EDGE_DOWN:
-		new_output = wlr_output_layout_adjacent_output(
-			layout, WLR_DIRECTION_DOWN, current_output, 0, 1);
-		break;
-	default:
-		break;
+	enum wlr_direction direction = get_wlr_direction(edge);
+	new_output = wlr_output_layout_adjacent_output(layout, direction,
+		current_output, lx, ly);
+
+	/*
+	 * Optionally wrap around from top-to-bottom or left-to-right, and vice
+	 * versa.
+	 */
+	if (wrap && !new_output) {
+		new_output = wlr_output_layout_farthest_output(layout,
+			opposite_direction(direction), current_output, lx, ly);
 	}
 
-	/* When "adjacent" output is the same as the original, there is no adjacent */
+	/*
+	 * When "adjacent" output is the same as the original, there is no
+	 * adjacent
+	 */
 	if (!new_output || new_output == current_output) {
 		return NULL;
 	}
@@ -1629,7 +1820,8 @@ view_move_to_edge(struct view *view, enum view_edge direction, bool snap_to_wind
 	}
 
 	/* Otherwise, move to edge of next adjacent display, if possible */
-	struct output *output = view_get_adjacent_output(view, direction);
+	struct output *output =
+		view_get_adjacent_output(view, direction, /* wrap */ false);
 	if (!output) {
 		return;
 	}
@@ -1768,6 +1960,24 @@ view_edge_parse(const char *direction)
 	}
 }
 
+enum view_placement_policy
+view_placement_parse(const char *policy)
+{
+	if (!policy) {
+		return LAB_PLACE_CENTER;
+	}
+
+	if (!strcasecmp(policy, "automatic")) {
+		return LAB_PLACE_AUTOMATIC;
+	} else if (!strcasecmp(policy, "cursor")) {
+		return LAB_PLACE_CURSOR;
+	} else if (!strcasecmp(policy, "center")) {
+		return LAB_PLACE_CENTER;
+	}
+
+	return LAB_PLACE_INVALID;
+}
+
 void
 view_snap_to_edge(struct view *view, enum view_edge edge,
 			bool across_outputs, bool store_natural_geometry)
@@ -1788,7 +1998,7 @@ view_snap_to_edge(struct view *view, enum view_edge edge,
 
 	if (across_outputs && view->tiled == edge && view->maximized == VIEW_AXIS_NONE) {
 		/* We are already tiled for this edge; try to switch outputs */
-		output = view_get_adjacent_output(view, edge);
+		output = view_get_adjacent_output(view, edge, /* wrap */ false);
 
 		if (!output) {
 			/*
@@ -1871,7 +2081,8 @@ view_move_to_output(struct view *view, struct output *output)
 		struct wlr_box output_area = output_usable_area_in_layout_coords(output);
 		view->pending.x = output_area.x;
 		view->pending.y = output_area.y;
-		view_place_initial(view, /* allow_cursor */ false);
+		view_place_by_policy(view,
+				/* allow_cursor */ false, rc.placement_policy);
 	} else if (view->maximized != VIEW_AXIS_NONE) {
 		view_apply_maximized_geometry(view);
 	} else if (view->tiled) {
@@ -1948,6 +2159,7 @@ view_move_to_front(struct view *view)
 	}
 
 	cursor_update_focus(view->server);
+	desktop_update_top_layer_visiblity(view->server);
 }
 
 void
@@ -1961,6 +2173,7 @@ view_move_to_back(struct view *view)
 	move_to_back(root);
 
 	cursor_update_focus(view->server);
+	desktop_update_top_layer_visiblity(view->server);
 }
 
 struct view *
@@ -1980,17 +2193,6 @@ view_append_children(struct view *view, struct wl_array *children)
 	if (view->impl->append_children) {
 		view->impl->append_children(view, children);
 	}
-}
-
-bool
-view_is_related(struct view *view, struct wlr_surface *surface)
-{
-	assert(view);
-	assert(surface);
-	if (view->impl->is_related) {
-		return view->impl->is_related(view, surface);
-	}
-	return false;
 }
 
 bool
@@ -2134,6 +2336,10 @@ view_set_shade(struct view *view, bool shaded)
 	view->shaded = shaded;
 	ssd_enable_shade(view->ssd, view->shaded);
 	wlr_scene_node_set_enabled(view->scene_node, !view->shaded);
+
+	if (view->impl->shade) {
+		view->impl->shade(view, shaded);
+	}
 }
 
 void
@@ -2141,6 +2347,8 @@ view_destroy(struct view *view)
 {
 	assert(view);
 	struct server *server = view->server;
+
+	snap_constraints_invalidate(view);
 
 	if (view->mappable.connected) {
 		mappable_disconnect(&view->mappable);
@@ -2162,7 +2370,7 @@ view_destroy(struct view *view)
 		/* Application got killed while moving around */
 		server->input_mode = LAB_INPUT_STATE_PASSTHROUGH;
 		server->grabbed_view = NULL;
-		regions_hide_overlay(&server->seat);
+		overlay_hide(&server->seat);
 	}
 
 	if (server->active_view == view) {

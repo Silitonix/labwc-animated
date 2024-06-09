@@ -12,19 +12,12 @@
 #include "config/touch.h"
 #include "config/tablet.h"
 #include "config/libinput.h"
-#include "resize_indicator.h"
+#include "resize-indicator.h"
 #include "theme.h"
 
-enum window_switcher_field_content {
-	LAB_FIELD_NONE = 0,
-	LAB_FIELD_TYPE,
-	LAB_FIELD_IDENTIFIER,
-	LAB_FIELD_TRIMMED_IDENTIFIER,
-	LAB_FIELD_TITLE,
-};
-
 enum view_placement_policy {
-	LAB_PLACE_CENTER = 0,
+	LAB_PLACE_INVALID = 0,
+	LAB_PLACE_CENTER,
 	LAB_PLACE_CURSOR,
 	LAB_PLACE_AUTOMATIC
 };
@@ -47,12 +40,6 @@ struct usable_area_override {
 	struct border margin;
 	char *output;
 	struct wl_list link; /* struct rcxml.usable_area_overrides */
-};
-
-struct window_switcher_field {
-	enum window_switcher_field_content content;
-	int width;
-	struct wl_list link; /* struct rcxml.window_switcher.fields */
 };
 
 struct rcxml {
@@ -78,10 +65,12 @@ struct rcxml {
 	char *theme_name;
 	int corner_radius;
 	bool ssd_keep_border;
+	bool shadows_enabled;
 	struct font font_activewindow;
 	struct font font_inactivewindow;
 	struct font font_menuitem;
 	struct font font_osd;
+
 	/* Pointer to current theme */
 	struct theme *theme;
 
@@ -105,6 +94,7 @@ struct rcxml {
 
 	/* graphics tablet */
 	struct tablet_config {
+		bool force_mouse_emulation;
 		char *output_name;
 		struct wlr_fbox box;
 		enum rotation rotation;
@@ -121,6 +111,9 @@ struct rcxml {
 
 	/* window snapping */
 	int snap_edge_range;
+	bool snap_overlay_enabled;
+	int snap_overlay_delay_inner;
+	int snap_overlay_delay_outer;
 	bool snap_top_maximize;
 	enum tiling_events_mode snap_tiling_events_mode;
 
@@ -129,20 +122,33 @@ struct rcxml {
 	struct {
 		int popuptime;
 		int min_nr_workspaces;
+		char *prefix;
 		struct wl_list workspaces;  /* struct workspace.link */
 	} workspace_config;
 
 	/* Regions */
 	struct wl_list regions;  /* struct region.link */
 
+	/* Window Switcher */
 	struct {
 		bool show;
 		bool preview;
 		bool outlines;
+		uint32_t criteria;
 		struct wl_list fields;  /* struct window_switcher_field.link */
 	} window_switcher;
 
 	struct wl_list window_rules; /* struct window_rule.link */
+
+	/* Menu */
+	unsigned int menu_ignore_button_release_period;
+
+	/* Magnifier */
+	int mag_width;
+	int mag_height;
+	float mag_scale;
+	float mag_increment;
+	bool mag_filter;
 };
 
 extern struct rcxml rc;

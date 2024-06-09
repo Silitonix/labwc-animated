@@ -17,6 +17,14 @@ enum lab_justification {
 	LAB_JUSTIFY_RIGHT,
 };
 
+struct theme_snapping_overlay {
+	bool bg_enabled;
+	bool border_enabled;
+	float bg_color[4];
+	int border_width;
+	float border_color[3][4];
+};
+
 struct theme {
 	int border_width;
 	int padding_height;
@@ -75,9 +83,21 @@ struct theme {
 	int osd_window_switcher_item_padding_x;
 	int osd_window_switcher_item_padding_y;
 	int osd_window_switcher_item_active_border_width;
+	bool osd_window_switcher_width_is_percent;
+	int osd_window_switcher_preview_border_width;
+	float osd_window_switcher_preview_border_color[3][4];
 
 	int osd_workspace_switcher_boxes_width;
 	int osd_workspace_switcher_boxes_height;
+
+	struct theme_snapping_overlay
+		snapping_overlay_region, snapping_overlay_edge;
+
+	/* window drop-shadows */
+	int window_active_shadow_size;
+	int window_inactive_shadow_size;
+	float window_active_shadow_color[4];
+	float window_inactive_shadow_color[4];
 
 	/* textures */
 	struct lab_data_buffer *button_close_active_unpressed;
@@ -110,17 +130,31 @@ struct theme {
 	struct lab_data_buffer *corner_top_left_inactive_normal;
 	struct lab_data_buffer *corner_top_right_inactive_normal;
 
+	struct lab_data_buffer *shadow_corner_top_active;
+	struct lab_data_buffer *shadow_corner_bottom_active;
+	struct lab_data_buffer *shadow_edge_active;
+	struct lab_data_buffer *shadow_corner_top_inactive;
+	struct lab_data_buffer *shadow_corner_bottom_inactive;
+	struct lab_data_buffer *shadow_edge_inactive;
+
 	/* not set in rc.xml/themerc, but derived from font & padding_height */
 	int osd_window_switcher_item_height;
+
+	/* magnifier */
+	float mag_border_color[4];
+	int mag_border_width;
 };
+
+struct server;
 
 /**
  * theme_init - read openbox theme and generate button textures
  * @theme: theme data
+ * @server: server
  * @theme_name: theme-name in <theme-dir>/<theme-name>/openbox-3/themerc
  * Note <theme-dir> is obtained in theme-dir.c
  */
-void theme_init(struct theme *theme, const char *theme_name);
+void theme_init(struct theme *theme, struct server *server, const char *theme_name);
 
 /**
  * theme_finish - free button textures

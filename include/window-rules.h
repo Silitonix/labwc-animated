@@ -2,6 +2,9 @@
 #ifndef LABWC_WINDOW_RULES_H
 #define LABWC_WINDOW_RULES_H
 
+#include <stdbool.h>
+#include <wayland-util.h>
+
 enum window_rule_event {
 	LAB_WINDOW_RULE_EVENT_ON_FIRST_MAP = 0,
 };
@@ -21,6 +24,9 @@ enum property {
 struct window_rule {
 	char *identifier;
 	char *title;
+	int window_type;
+	char *sandbox_engine;
+	char *sandbox_app_id;
 	bool match_once;
 
 	enum window_rule_event event;
@@ -30,6 +36,7 @@ struct window_rule {
 	enum property skip_taskbar;
 	enum property skip_window_switcher;
 	enum property ignore_focus_request;
+	enum property ignore_configure_request;
 	enum property fixed_position;
 
 	struct wl_list link; /* struct rcxml.window_rules */

@@ -15,7 +15,10 @@
 #include "common/string-helpers.h"
 #include "debug.h"
 #include "labwc.h"
+#include "magnifier.h"
 #include "menu/menu.h"
+#include "osd.h"
+#include "output-virtual.h"
 #include "placement.h"
 #include "regions.h"
 #include "ssd.h"
@@ -75,7 +78,9 @@ enum action_type {
 	ACTION_TYPE_SHOW_MENU,
 	ACTION_TYPE_TOGGLE_MAXIMIZE,
 	ACTION_TYPE_MAXIMIZE,
+	ACTION_TYPE_UNMAXIMIZE,
 	ACTION_TYPE_TOGGLE_FULLSCREEN,
+	ACTION_TYPE_SET_DECORATIONS,
 	ACTION_TYPE_TOGGLE_DECORATIONS,
 	ACTION_TYPE_TOGGLE_ALWAYS_ON_TOP,
 	ACTION_TYPE_TOGGLE_ALWAYS_ON_BOTTOM,
@@ -108,6 +113,9 @@ enum action_type {
 	ACTION_TYPE_SHADE,
 	ACTION_TYPE_UNSHADE,
 	ACTION_TYPE_TOGGLE_SHADE,
+	ACTION_TYPE_TOGGLE_MAGNIFY,
+	ACTION_TYPE_ZOOM_IN,
+	ACTION_TYPE_ZOOM_OUT
 };
 
 const char *action_names[] = {
@@ -128,7 +136,9 @@ const char *action_names[] = {
 	"ShowMenu",
 	"ToggleMaximize",
 	"Maximize",
+	"UnMaximize",
 	"ToggleFullscreen",
+	"SetDecorations",
 	"ToggleDecorations",
 	"ToggleAlwaysOnTop",
 	"ToggleAlwaysOnBottom",
@@ -161,6 +171,9 @@ const char *action_names[] = {
 	"Shade",
 	"Unshade",
 	"ToggleShade",
+	"ToggleMagnify",
+	"ZoomIn",
+	"ZoomOut",
 	NULL
 };
 
@@ -320,9 +333,14 @@ action_arg_from_xml_node(struct action *action, const char *nodename, const char
 			action_arg_add_str(action, argument, content);
 			goto cleanup;
 		}
+		if (!strcasecmp(argument, "atCursor")) {
+			action_arg_add_bool(action, argument, parse_bool(content, true));
+			goto cleanup;
+		}
 		break;
 	case ACTION_TYPE_TOGGLE_MAXIMIZE:
 	case ACTION_TYPE_MAXIMIZE:
+	case ACTION_TYPE_UNMAXIMIZE:
 		if (!strcmp(argument, "direction")) {
 			enum view_axis axis = view_axis_parse(content);
 			if (axis == VIEW_AXIS_NONE) {
@@ -331,6 +349,17 @@ action_arg_from_xml_node(struct action *action, const char *nodename, const char
 			} else {
 				action_arg_add_int(action, argument, axis);
 			}
+			goto cleanup;
+		}
+		break;
+	case ACTION_TYPE_SET_DECORATIONS:
+		if (!strcmp(argument, "decorations")) {
+			enum ssd_mode mode = ssd_mode_parse(content);
+			action_arg_add_int(action, argument, mode);
+			goto cleanup;
+		}
+		if (!strcasecmp(argument, "forceSSD")) {
+			action_arg_add_bool(action, argument, parse_bool(content, false));
 			goto cleanup;
 		}
 		break;
@@ -383,7 +412,7 @@ action_arg_from_xml_node(struct action *action, const char *nodename, const char
 		}
 		break;
 	case ACTION_TYPE_MOVE_TO_OUTPUT:
-		if (!strcmp(argument, "name")) {
+		if (!strcmp(argument, "output")) {
 			action_arg_add_str(action, argument, content);
 			goto cleanup;
 		}
@@ -397,11 +426,28 @@ action_arg_from_xml_node(struct action *action, const char *nodename, const char
 			}
 			goto cleanup;
 		}
+		if (!strcmp(argument, "wrap")) {
+			action_arg_add_bool(action, argument, parse_bool(content, false));
+			goto cleanup;
+		}
 		break;
 	case ACTION_TYPE_VIRTUAL_OUTPUT_ADD:
 	case ACTION_TYPE_VIRTUAL_OUTPUT_REMOVE:
 		if (!strcmp(argument, "output_name")) {
 			action_arg_add_str(action, argument, content);
+			goto cleanup;
+		}
+		break;
+	case ACTION_TYPE_AUTO_PLACE:
+		if (!strcmp(argument, "policy")) {
+			enum view_placement_policy policy =
+				view_placement_parse(content);
+			if (policy == LAB_PLACE_INVALID) {
+				wlr_log(WLR_ERROR, "Invalid argument for action %s: '%s' (%s)",
+						action_names[action->type], argument, content);
+			} else {
+				action_arg_add_int(action, argument, policy);
+			}
 			goto cleanup;
 		}
 		break;
@@ -505,7 +551,7 @@ action_is_valid(struct action *action)
 	case ACTION_TYPE_IF:
 	case ACTION_TYPE_FOR_EACH:
 		; /* works around "a label can only be part of a statement" */
-		static const char * const branches[] = { "then", "else" };
+		static const char * const branches[] = { "then", "else", "none" };
 		for (size_t i = 0; i < ARRAY_SIZE(branches); i++) {
 			struct wl_list *children = action_get_actionlist(action, branches[i]);
 			if (children && !action_list_is_valid(children)) {
@@ -566,7 +612,8 @@ action_list_free(struct wl_list *action_list)
 }
 
 static void
-show_menu(struct server *server, struct view *view, const char *menu_name)
+show_menu(struct server *server, struct view *view,
+		const char *menu_name, bool at_cursor)
 {
 	if (server->input_mode != LAB_INPUT_STATE_PASSTHROUGH
 			&& server->input_mode != LAB_INPUT_STATE_MENU) {
@@ -574,37 +621,28 @@ show_menu(struct server *server, struct view *view, const char *menu_name)
 		return;
 	}
 
-	bool force_menu_top_left = false;
 	struct menu *menu = menu_get_by_id(server, menu_name);
 	if (!menu) {
 		return;
 	}
-	if (!strcasecmp(menu_name, "client-menu")) {
-		if (!view) {
-			return;
-		}
-		enum ssd_part_type type = ssd_at(view->ssd, server->scene,
-			server->seat.cursor->x, server->seat.cursor->y);
-		if (type == LAB_SSD_BUTTON_WINDOW_MENU) {
-			force_menu_top_left = true;
-		} else if (ssd_part_contains(LAB_SSD_PART_TITLEBAR, type)) {
-			force_menu_top_left = false;
-		} else {
-			force_menu_top_left = true;
-		}
+
+	int x = server->seat.cursor->x;
+	int y = server->seat.cursor->y;
+
+	/* The client menu needs an active client */
+	if (!view && strcasecmp(menu_name, "client-menu") == 0) {
+		return;
 	}
 
-	int x, y;
-	if (force_menu_top_left) {
+	/* Place menu in the view corner if desired (and menu is not root-menu) */
+	if (!at_cursor && view) {
 		x = view->current.x;
 		y = view->current.y;
-	} else {
-		x = server->seat.cursor->x;
-		y = server->seat.cursor->y;
 	}
+
 	/* Replaced by next show_menu() or cleaned on view_destroy() */
 	menu->triggered_by_view = view;
-	menu_open(menu, x, y);
+	menu_open_root(menu, x, y);
 }
 
 static struct view *
@@ -634,7 +672,7 @@ view_for_action(struct view *activator, struct server *server,
 	}
 }
 
-static void
+static bool
 run_if_action(struct view *view, struct server *server, struct action *action)
 {
 	struct view_query *query;
@@ -657,6 +695,7 @@ run_if_action(struct view *view, struct server *server, struct action *action)
 	if (actions) {
 		actions_run(view, server, actions, 0);
 	}
+	return !strcmp(branch, "then");
 }
 
 void
@@ -688,12 +727,13 @@ actions_run(struct view *activator, struct server *server,
 			}
 			break;
 		case ACTION_TYPE_KILL:
-			if (view && view->surface) {
+			if (view) {
 				/* Send SIGTERM to the process associated with the surface */
-				pid_t pid = -1;
-				struct wl_client *client = view->surface->resource->client;
-				wl_client_get_credentials(client, &pid, NULL, NULL);
-				if (pid != -1) {
+				assert(view->impl->get_pid);
+				pid_t pid = view->impl->get_pid(view);
+				if (pid == getpid()) {
+					wlr_log(WLR_ERROR, "Preventing sending SIGTERM to labwc");
+				} else if (pid > 0) {
 					kill(pid, SIGTERM);
 				}
 			}
@@ -703,12 +743,11 @@ actions_run(struct view *activator, struct server *server,
 			break;
 		case ACTION_TYPE_EXECUTE:
 			{
-				struct buf cmd;
-				buf_init(&cmd);
+				struct buf cmd = BUF_INIT;
 				buf_add(&cmd, action_get_str(action, "command", NULL));
 				buf_expand_tilde(&cmd);
-				spawn_async_no_shell(cmd.buf);
-				free(cmd.buf);
+				spawn_async_no_shell(cmd.data);
+				buf_reset(&cmd);
 			}
 			break;
 		case ACTION_TYPE_EXIT:
@@ -759,7 +798,9 @@ actions_run(struct view *activator, struct server *server,
 			kill(getpid(), SIGHUP);
 			break;
 		case ACTION_TYPE_SHOW_MENU:
-			show_menu(server, view, action_get_str(action, "menu", NULL));
+			show_menu(server, view,
+				action_get_str(action, "menu", NULL),
+				action_get_bool(action, "atCursor", true));
 			break;
 		case ACTION_TYPE_TOGGLE_MAXIMIZE:
 			if (view) {
@@ -776,9 +817,26 @@ actions_run(struct view *activator, struct server *server,
 					/*store_natural_geometry*/ true);
 			}
 			break;
+		case ACTION_TYPE_UNMAXIMIZE:
+			if (view) {
+				enum view_axis axis = action_get_int(action,
+					"direction", VIEW_AXIS_BOTH);
+				view_maximize(view, view->maximized & ~axis,
+					/*store_natural_geometry*/ true);
+			}
+			break;
 		case ACTION_TYPE_TOGGLE_FULLSCREEN:
 			if (view) {
 				view_toggle_fullscreen(view);
+			}
+			break;
+		case ACTION_TYPE_SET_DECORATIONS:
+			if (view) {
+				enum ssd_mode mode = action_get_int(action,
+					"decorations", LAB_SSD_MODE_FULL);
+				bool force_ssd = action_get_bool(action,
+					"forceSSD", false);
+				view_set_decorations(view, mode, force_ssd);
 			}
 			break;
 		case ACTION_TYPE_TOGGLE_DECORATIONS:
@@ -879,6 +937,9 @@ actions_run(struct view *activator, struct server *server,
 			}
 			break;
 		case ACTION_TYPE_MOVETO_CURSOR:
+			wlr_log(WLR_ERROR,
+				"Action MoveToCursor is deprecated. To ensure your config works in future labwc "
+				"releases, please use <action name=\"AutoPlace\" policy=\"cursor\">");
 			if (view) {
 				view_move_to_cursor(view);
 			}
@@ -906,6 +967,11 @@ actions_run(struct view *activator, struct server *server,
 				if (action->type == ACTION_TYPE_SEND_TO_DESKTOP) {
 					view_move_to_workspace(view, target);
 					follow = action_get_bool(action, "follow", true);
+
+					/* Ensure that the focus is not on another desktop */
+					if (!follow && server->active_view == view) {
+						desktop_focus_topmost_view(server);
+					}
 				}
 				if (follow) {
 					workspaces_switch_to(target,
@@ -917,17 +983,22 @@ actions_run(struct view *activator, struct server *server,
 			if (!view) {
 				break;
 			}
-			const char *name = action_get_str(action, "name", NULL);
+			const char *output_name = action_get_str(action, "output", NULL);
 			struct output *target = NULL;
-			if (name) {
-				target = output_from_name(view->server, name);
+			if (output_name) {
+				target = output_from_name(view->server, output_name);
 			} else {
-				/* Config parsing makes sure that direction is a valid direction */
 				enum view_edge edge = action_get_int(action, "direction", 0);
-				target = view_get_adjacent_output(view, edge);
+				bool wrap = action_get_bool(action, "wrap", false);
+				target = view_get_adjacent_output(view, edge, wrap);
 			}
 			if (!target) {
-				wlr_log(WLR_ERROR, "Invalid output.");
+				/*
+				 * Most likely because we're already on the
+				 * output furthest in the requested direction
+				 * or the output or direction was invalid.
+				 */
+				wlr_log(WLR_DEBUG, "Invalid output");
 				break;
 			}
 			view_move_to_output(view, target);
@@ -975,34 +1046,43 @@ actions_run(struct view *activator, struct server *server,
 			{
 				struct wl_array views;
 				struct view **item;
+				bool matches = false;
 				wl_array_init(&views);
 				view_array_append(server, &views, LAB_VIEW_CRITERIA_NONE);
 				wl_array_for_each(item, &views) {
-					run_if_action(*item, server, action);
+					matches |= run_if_action(*item, server, action);
 				}
 				wl_array_release(&views);
+				if (!matches) {
+					struct wl_list *actions;
+					actions = action_get_actionlist(action, "none");
+					if (actions) {
+						actions_run(view, server, actions, 0);
+					}
+				}
 			}
 			break;
 		case ACTION_TYPE_VIRTUAL_OUTPUT_ADD:
 			{
 				const char *output_name = action_get_str(action, "output_name",
 						NULL);
-				output_add_virtual(server, output_name);
+				output_virtual_add(server, output_name,
+					/*store_wlr_output*/ NULL);
 			}
 			break;
 		case ACTION_TYPE_VIRTUAL_OUTPUT_REMOVE:
 			{
 				const char *output_name = action_get_str(action, "output_name",
 						NULL);
-				output_remove_virtual(server, output_name);
+				output_virtual_remove(server, output_name);
 			}
 			break;
 		case ACTION_TYPE_AUTO_PLACE:
 			if (view) {
-				struct wlr_box geometry = view->pending;
-				if (placement_find_best(view, &geometry)) {
-					view_move(view, geometry.x, geometry.y);
-				}
+				enum view_placement_policy policy =
+					action_get_int(action, "policy", LAB_PLACE_AUTOMATIC);
+				view_place_by_policy(view,
+					/* allow_cursor */ true, policy);
 			}
 			break;
 		case ACTION_TYPE_TOGGLE_TEARING:
@@ -1027,6 +1107,15 @@ actions_run(struct view *activator, struct server *server,
 				view_set_shade(view, false);
 			}
 			break;
+		case ACTION_TYPE_TOGGLE_MAGNIFY:
+			magnify_toggle(server);
+			break;
+		case ACTION_TYPE_ZOOM_IN:
+			magnify_set_scale(server, MAGNIFY_INCREASE);
+			break;
+		case ACTION_TYPE_ZOOM_OUT:
+			magnify_set_scale(server, MAGNIFY_DECREASE);
+			break;
 		case ACTION_TYPE_INVALID:
 			wlr_log(WLR_ERROR, "Not executing unknown action");
 			break;
@@ -1042,4 +1131,3 @@ actions_run(struct view *activator, struct server *server,
 		}
 	}
 }
-

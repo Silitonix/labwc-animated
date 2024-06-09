@@ -10,7 +10,6 @@
 #include <assert.h>
 #include <strings.h>
 #include <wlr/backend/drm.h>
-#include <wlr/backend/headless.h>
 #include <wlr/backend/wayland.h>
 #include <wlr/types/wlr_buffer.h>
 #include <wlr/types/wlr_drm_lease_v1.h>
@@ -25,6 +24,7 @@
 #include "labwc.h"
 #include "layers.h"
 #include "node.h"
+#include "output-virtual.h"
 #include "regions.h"
 #include "view.h"
 #include "xwayland.h"
@@ -57,6 +57,17 @@ output_frame_notify(struct wl_listener *listener, void *data)
 	 */
 	struct output *output = wl_container_of(listener, output, frame);
 	if (!output_is_usable(output)) {
+		return;
+	}
+
+	if (!output->scene_output) {
+		/*
+		 * TODO: This is a short term fix for issue #1667,
+		 *       a proper fix would require restructuring
+		 *       the life cycle of scene outputs, e.g.
+		 *       creating them on new_output_notify() only.
+		 */
+		wlr_log(WLR_INFO, "Failed to render new frame: no scene-output");
 		return;
 	}
 
@@ -102,13 +113,17 @@ static void
 output_destroy_notify(struct wl_listener *listener, void *data)
 {
 	struct output *output = wl_container_of(listener, output, destroy);
+	struct seat *seat = &output->server->seat;
 	regions_evacuate_output(output);
-	regions_destroy(&output->server->seat, &output->regions);
+	regions_destroy(seat, &output->regions);
+	if (seat->overlay.active.output == output) {
+		overlay_hide(seat);
+	}
 	wl_list_remove(&output->link);
 	wl_list_remove(&output->frame.link);
 	wl_list_remove(&output->destroy.link);
 	wl_list_remove(&output->request_state.link);
-	seat_output_layout_changed(&output->server->seat);
+	seat_output_layout_changed(seat);
 
 	for (size_t i = 0; i < ARRAY_SIZE(output->layer_tree); i++) {
 		wlr_scene_node_destroy(&output->layer_tree[i]->node);
@@ -150,6 +165,32 @@ output_request_state_notify(struct wl_listener *listener, void *data)
 	struct output *output = wl_container_of(listener, output, request_state);
 	const struct wlr_output_event_request_state *event = data;
 
+	/*
+	 * If wlroots ever requests other state changes here we could
+	 * restore more of ddc9047a67cd53b2948f71fde1bbe9118000dd3f.
+	 */
+	if (event->state->committed == WLR_OUTPUT_STATE_MODE) {
+		/* Only the mode has changed */
+		switch (event->state->mode_type) {
+		case WLR_OUTPUT_STATE_MODE_FIXED:
+			wlr_output_set_mode(output->wlr_output, event->state->mode);
+			break;
+		case WLR_OUTPUT_STATE_MODE_CUSTOM:
+			wlr_output_set_custom_mode(output->wlr_output,
+				event->state->custom_mode.width,
+				event->state->custom_mode.height,
+				event->state->custom_mode.refresh);
+			break;
+		}
+		wlr_output_schedule_frame(output->wlr_output);
+		return;
+	}
+
+	/*
+	 * Fallback path for everything that we didn't handle above.
+	 * The commit will cause a black frame injection so this
+	 * path causes flickering during resize of nested outputs.
+	 */
 	if (!wlr_output_commit_state(output->wlr_output, event->state)) {
 		wlr_log(WLR_ERROR, "Backend requested a new state that could not be applied");
 	}
@@ -195,21 +236,28 @@ static void
 new_output_notify(struct wl_listener *listener, void *data)
 {
 	/*
-	 * This event is rasied by the backend when a new output (aka display
+	 * This event is raised by the backend when a new output (aka display
 	 * or monitor) becomes available.
 	 */
 	struct server *server = wl_container_of(listener, server, new_output);
 	struct wlr_output *wlr_output = data;
 
-	/* Name virtual output */
-	if (wlr_output_is_headless(wlr_output) && server->headless.pending_output_name[0] != '\0') {
-		wlr_output_set_name(wlr_output, server->headless.pending_output_name);
-		server->headless.pending_output_name[0] = '\0';
+	struct output *output;
+	wl_list_for_each(output, &server->outputs, link) {
+		if (output->wlr_output == wlr_output) {
+			/*
+			 * This is a duplicated notification.
+			 * We may end up here when a virtual output
+			 * was added before the headless backend was
+			 * started up.
+			 */
+			return;
+		}
 	}
 
 	/*
 	 * We offer any display as available for lease, some apps like
-	 * gamescope, want to take ownership of a display when they can
+	 * gamescope want to take ownership of a display when they can
 	 * to use planes and present directly.
 	 * This is also useful for debugging the DRM parts of
 	 * another compositor.
@@ -279,7 +327,7 @@ new_output_notify(struct wl_listener *listener, void *data)
 
 	wlr_output_commit(wlr_output);
 
-	struct output *output = znew(*output);
+	output = znew(*output);
 	output->wlr_output = wlr_output;
 	wlr_output->data = output;
 	output->server = server;
@@ -347,8 +395,8 @@ new_output_notify(struct wl_listener *listener, void *data)
 	/* Create regions from config */
 	regions_reconfigure_output(output);
 
-	if (server->session_lock) {
-		session_lock_output_create(server->session_lock, output);
+	if (server->session_lock_manager->locked) {
+		session_lock_output_create(server->session_lock_manager, output);
 	}
 
 	server->pending_output_layout_change--;
@@ -394,7 +442,7 @@ static void
 output_update_for_layout_change(struct server *server)
 {
 	output_update_all_usable_areas(server, /*layout_changed*/ true);
-	session_lock_update_for_layout_change();
+	session_lock_update_for_layout_change(server);
 
 	/*
 	 * "Move" each wlr_output_cursor (in per-output coordinates) to
@@ -662,6 +710,12 @@ handle_output_layout_change(struct wl_listener *listener, void *data)
 {
 	struct server *server =
 		wl_container_of(listener, server, output_layout_change);
+
+	/* Prevents unnecessary layout recalculations */
+	server->pending_output_layout_change++;
+	output_virtual_update_fallback(server);
+	server->pending_output_layout_change--;
+
 	do_output_layout_change(server);
 }
 
@@ -865,59 +919,6 @@ handle_output_power_manager_set_mode(struct wl_listener *listener, void *data)
 		 */
 		cursor_update_image(&server->seat);
 		break;
-	}
-}
-
-void
-output_add_virtual(struct server *server, const char *output_name)
-{
-	if (output_name) {
-		/* Prevent creating outputs with the same name */
-		struct output *output;
-		wl_list_for_each(output, &server->outputs, link) {
-			if (wlr_output_is_headless(output->wlr_output) &&
-					!strcmp(output->wlr_output->name, output_name)) {
-				wlr_log(WLR_DEBUG,
-					"refusing to create virtual output with duplicate name");
-				return;
-			}
-		}
-		snprintf(server->headless.pending_output_name,
-			sizeof(server->headless.pending_output_name), "%s", output_name);
-	} else {
-		server->headless.pending_output_name[0] = '\0';
-	}
-	/*
-	 * Setting it to (0, 0) here disallows changing resolution from tools like
-	 * wlr-randr (returns error)
-	 */
-	wlr_headless_add_output(server->headless.backend, 1920, 1080);
-}
-
-void
-output_remove_virtual(struct server *server, const char *output_name)
-{
-	struct output *output;
-	wl_list_for_each(output, &server->outputs, link) {
-		if (wlr_output_is_headless(output->wlr_output)) {
-			if (output_name) {
-				/*
-				 * Given virtual output name, find and destroy virtual output by
-				 * that name.
-				 */
-				if (!strcmp(output->wlr_output->name, output_name)) {
-					wlr_output_destroy(output->wlr_output);
-					return;
-				}
-			} else {
-				/*
-				 * When virtual output name was no supplied by user, simply
-				 * destroy the first virtual output found.
-				 */
-				wlr_output_destroy(output->wlr_output);
-				return;
-			}
-		}
 	}
 }
 

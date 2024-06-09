@@ -2,6 +2,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "config.h"
 #include <signal.h>
+#include <string.h>
 #include <sys/wait.h>
 #include <wlr/backend/headless.h>
 #include <wlr/backend/multi.h>
@@ -13,10 +14,13 @@
 #include <wlr/types/wlr_presentation_time.h>
 #include <wlr/types/wlr_primary_selection_v1.h>
 #include <wlr/types/wlr_screencopy_v1.h>
+#include <wlr/types/wlr_security_context_v1.h>
 #include <wlr/types/wlr_single_pixel_buffer_v1.h>
 #include <wlr/types/wlr_viewporter.h>
+#include <wlr/types/wlr_tablet_v2.h>
 #if HAVE_XWAYLAND
 #include <wlr/xwayland.h>
+#include "xwayland-shell-v1-protocol.h"
 #endif
 #include "drm-lease-v1-protocol.h"
 #include "config/rcxml.h"
@@ -26,8 +30,9 @@
 #include "labwc.h"
 #include "layers.h"
 #include "menu/menu.h"
+#include "output-virtual.h"
 #include "regions.h"
-#include "resize_indicator.h"
+#include "resize-indicator.h"
 #include "theme.h"
 #include "view.h"
 #include "workspaces.h"
@@ -40,34 +45,37 @@ static struct wlr_compositor *compositor;
 static struct wl_event_source *sighup_source;
 static struct wl_event_source *sigint_source;
 static struct wl_event_source *sigterm_source;
-
-static struct server *g_server;
+static struct wl_event_source *sigchld_source;
 
 static void
-reload_config_and_theme(void)
+reload_config_and_theme(struct server *server)
 {
 	rcxml_finish();
 	rcxml_read(rc.config_file);
-	theme_finish(g_server->theme);
-	theme_init(g_server->theme, rc.theme_name);
+	theme_finish(server->theme);
+	theme_init(server->theme, server, rc.theme_name);
 
 	struct view *view;
-	wl_list_for_each(view, &g_server->views, link) {
+	wl_list_for_each(view, &server->views, link) {
 		view_reload_ssd(view);
 	}
 
-	menu_reconfigure(g_server);
-	seat_reconfigure(g_server);
-	regions_reconfigure(g_server);
-	resize_indicator_reconfigure(g_server);
+	menu_reconfigure(server);
+	seat_reconfigure(server);
+	regions_reconfigure(server);
+	resize_indicator_reconfigure(server);
 	kde_server_decoration_update_default();
+	workspaces_reconfigure(server);
 }
 
 static int
 handle_sighup(int signal, void *data)
 {
+	struct server *server = data;
+
 	session_environment_init();
-	reload_config_and_theme();
+	reload_config_and_theme(server);
+	output_virtual_update_fallback(server);
 	return 0;
 }
 
@@ -77,6 +85,68 @@ handle_sigterm(int signal, void *data)
 	struct wl_display *display = data;
 
 	wl_display_terminate(display);
+	return 0;
+}
+
+static int
+handle_sigchld(int signal, void *data)
+{
+	siginfo_t info;
+	info.si_pid = 0;
+	struct server *server = data;
+
+	/* First call waitid() with NOWAIT which doesn't consume the zombie */
+	if (waitid(P_ALL, /*id*/ 0, &info, WEXITED | WNOHANG | WNOWAIT) == -1) {
+		return 0;
+	}
+
+	if (info.si_pid == 0) {
+		/* No children in waitable state */
+		return 0;
+	}
+
+#if HAVE_XWAYLAND
+	/* Ensure that we do not break xwayland lazy initialization */
+	if (server->xwayland && server->xwayland->server
+			&& info.si_pid == server->xwayland->server->pid) {
+		return 0;
+	}
+#endif
+
+	/* And then do the actual (consuming) lookup again */
+	int ret = waitid(P_PID, info.si_pid, &info, WEXITED);
+	if (ret == -1) {
+		wlr_log(WLR_ERROR, "blocking waitid() for %ld failed: %d",
+			(long)info.si_pid, ret);
+		return 0;
+	}
+
+	switch (info.si_code) {
+	case CLD_EXITED:
+		wlr_log(info.si_status == 0 ? WLR_DEBUG : WLR_ERROR,
+			"spawned child %ld exited with %d",
+			(long)info.si_pid, info.si_status);
+		break;
+	case CLD_KILLED:
+	case CLD_DUMPED:
+		; /* works around "a label can only be part of a statement" */
+		const char *signame = strsignal(info.si_status);
+		wlr_log(WLR_ERROR,
+			"spawned child %ld terminated with signal %d (%s)",
+				(long)info.si_pid, info.si_status,
+				signame ? signame : "unknown");
+		break;
+	default:
+		wlr_log(WLR_ERROR,
+			"spawned child %ld terminated unexpectedly: %d"
+			" please report", (long)info.si_pid, info.si_code);
+	}
+
+	if (info.si_pid == server->primary_client_pid) {
+		wlr_log(WLR_INFO, "primary client %ld exited", (long)info.si_pid);
+		wl_display_terminate(server->wl_display);
+	}
+
 	return 0;
 }
 
@@ -172,9 +242,11 @@ server_global_filter(const struct wl_client *client, const struct wl_global *glo
 	(void)iface; (void)server;
 
 #if HAVE_XWAYLAND
-	struct wl_client *xwayland_client =
-		server->xwayland ? server->xwayland->server->client : NULL;
-	if (xwayland_client && client == xwayland_client) {
+	struct wl_client *xwayland_client = (server->xwayland && server->xwayland->server)
+		? server->xwayland->server->client
+		: NULL;
+
+	if (client == xwayland_client) {
 		/*
 		 * Filter out wp_drm_lease_device_v1 for now as it is resulting in
 		 * issues with Xwayland applications lagging over time.
@@ -184,8 +256,20 @@ server_global_filter(const struct wl_client *client, const struct wl_global *glo
 		if (!strcmp(iface->name, wp_drm_lease_device_v1_interface.name)) {
 			return false;
 		}
+	} else if (!strcmp(iface->name, xwayland_shell_v1_interface.name)) {
+		/* Filter out the xwayland shell for usual clients */
+		return false;
 	}
 #endif
+
+	/* Do not allow security_context_manager_v1 to clients with a security context attached */
+	const struct wlr_security_context_v1_state *security_context =
+		wlr_security_context_manager_v1_lookup_client(
+			server->security_context_manager_v1, (struct wl_client *)client);
+	if (security_context && global == server->security_context_manager_v1->global) {
+		wlr_log(WLR_DEBUG, "blocking security_context_manager_v1 for the sandboxed client");
+		return false;
+	}
 
 	return true;
 }
@@ -211,9 +295,19 @@ static const char helpful_seat_error_message[] =
 "If the above does not work, try running with `WLR_RENDERER=pixman labwc` in\n"
 "order to use the software rendering fallback\n";
 
+static void
+get_headless_backend(struct wlr_backend *backend, void *data)
+{
+	if (wlr_backend_is_headless(backend)) {
+		struct wlr_backend **headless = data;
+		*headless = backend;
+	}
+}
+
 void
 server_init(struct server *server)
 {
+	server->primary_client_pid = -1;
 	server->wl_display = wl_display_create();
 	if (!server->wl_display) {
 		wlr_log(WLR_ERROR, "cannot allocate a wayland display");
@@ -226,11 +320,13 @@ server_init(struct server *server)
 	struct wl_event_loop *event_loop = NULL;
 	event_loop = wl_display_get_event_loop(server->wl_display);
 	sighup_source = wl_event_loop_add_signal(
-		event_loop, SIGHUP, handle_sighup, NULL);
+		event_loop, SIGHUP, handle_sighup, server);
 	sigint_source = wl_event_loop_add_signal(
 		event_loop, SIGINT, handle_sigterm, server->wl_display);
 	sigterm_source = wl_event_loop_add_signal(
 		event_loop, SIGTERM, handle_sigterm, server->wl_display);
+	sigchld_source = wl_event_loop_add_signal(
+		event_loop, SIGCHLD, handle_sigchld, server);
 	server->wl_event_loop = event_loop;
 
 	/*
@@ -258,7 +354,16 @@ server_init(struct server *server)
 	}
 
 	/* Create headless backend to enable adding virtual outputs later on */
-	server->headless.backend = wlr_headless_backend_create(server->wl_display);
+	wlr_multi_for_each_backend(server->backend,
+		get_headless_backend, &server->headless.backend);
+
+	if (!server->headless.backend) {
+		wlr_log(WLR_DEBUG, "manually creating headless backend");
+		server->headless.backend = wlr_headless_backend_create(server->wl_display);
+	} else {
+		wlr_log(WLR_DEBUG, "headless backend already exists");
+	}
+
 	if (!server->headless.backend) {
 		wlr_log(WLR_ERROR, "unable to create headless backend");
 		exit(EXIT_FAILURE);
@@ -378,6 +483,10 @@ server_init(struct server *server)
 	 */
 	wlr_primary_selection_v1_device_manager_create(server->wl_display);
 
+	server->input_method_manager = wlr_input_method_manager_v2_create(
+		server->wl_display);
+	server->text_input_manager = wlr_text_input_manager_v3_create(
+		server->wl_display);
 	seat_init(server);
 	xdg_shell_init(server);
 	kde_server_decoration_init(server);
@@ -394,6 +503,8 @@ server_init(struct server *server)
 	wlr_export_dmabuf_manager_v1_create(server->wl_display);
 	wlr_screencopy_manager_v1_create(server->wl_display);
 	wlr_data_control_manager_v1_create(server->wl_display);
+	server->security_context_manager_v1 =
+		wlr_security_context_manager_v1_create(server->wl_display);
 	wlr_viewporter_create(server->wl_display);
 	wlr_single_pixel_buffer_manager_v1_create(server->wl_display);
 	wlr_fractional_scale_manager_v1_create(server->wl_display,
@@ -452,13 +563,13 @@ server_init(struct server *server)
 	server->tearing_new_object.notify = new_tearing_hint;
 	wl_signal_add(&server->tearing_control->events.new_object, &server->tearing_new_object);
 
+	server->tablet_manager = wlr_tablet_v2_create(server->wl_display);
+
 	layers_init(server);
 
 #if HAVE_XWAYLAND
 	xwayland_server_init(server, compositor);
 #endif
-	/* used when handling SIGHUP */
-	g_server = server;
 }
 
 void
@@ -479,6 +590,9 @@ server_start(struct server *server)
 		wlr_log(WLR_ERROR, "unable to start the wlroots backend");
 		exit(EXIT_FAILURE);
 	}
+
+	/* Potentially set up the initial fallback output */
+	output_virtual_update_fallback(server);
 
 	if (setenv("WAYLAND_DISPLAY", socket, true) < 0) {
 		wlr_log_errno(WLR_ERROR, "unable to set WAYLAND_DISPLAY");

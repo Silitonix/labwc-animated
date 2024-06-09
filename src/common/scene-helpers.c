@@ -5,6 +5,7 @@
 #include <wlr/types/wlr_scene.h>
 #include <wlr/util/log.h>
 #include "common/scene-helpers.h"
+#include "magnifier.h"
 
 struct wlr_surface *
 lab_wlr_surface_from_node(struct wlr_scene_node *node)
@@ -44,18 +45,33 @@ lab_wlr_scene_output_commit(struct wlr_scene_output *scene_output)
 	assert(scene_output);
 	struct wlr_output *wlr_output = scene_output->output;
 	struct wlr_output_state *state = &wlr_output->pending;
+	struct output *output = wlr_output->data;
+	bool wants_magnification = output_wants_magnification(output);
 
+	/*
+	 * FIXME: Regardless of wants_magnification, we are currently adding
+	 * damages to next frame when magnifier is shown, which forces
+	 * rendering on every output commit and overloads CPU.
+	 * We also need to verify the necessity of wants_magnification.
+	 */
 	if (!wlr_output->needs_frame && !pixman_region32_not_empty(
-			&scene_output->damage_ring.current)) {
+			&scene_output->damage_ring.current) && !wants_magnification) {
 		return false;
 	}
+
 	if (!wlr_scene_output_build_state(scene_output, state, NULL)) {
 		wlr_log(WLR_ERROR, "Failed to build output state for %s",
 			wlr_output->name);
 		return false;
 	}
+
+	struct wlr_box additional_damage = {0};
+	if (state->buffer && is_magnify_on()) {
+		magnify(output, state->buffer, &additional_damage);
+	}
+
 	if (!wlr_output_commit(wlr_output)) {
-		wlr_log(WLR_ERROR, "Failed to commit output %s",
+		wlr_log(WLR_INFO, "Failed to commit output %s",
 			wlr_output->name);
 		return false;
 	}
@@ -66,5 +82,9 @@ lab_wlr_scene_output_commit(struct wlr_scene_output *scene_output)
 	 * again.
 	 */
 	wlr_damage_ring_rotate(&scene_output->damage_ring);
+
+	if (!wlr_box_empty(&additional_damage)) {
+		wlr_damage_ring_add_box(&scene_output->damage_ring, &additional_damage);
+	}
 	return true;
 }
